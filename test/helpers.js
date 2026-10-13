@@ -5,7 +5,7 @@ export const HOST = 'dsh.example.com';
 export const ACCOUNT = 'a'.repeat(32), ZONE = 'b'.repeat(32), AUD = 'c'.repeat(64);
 export const SETUP = { accountId: ACCOUNT, zoneId: ZONE, hostname: HOST, ownerEmail: 'owner@example.com', idpId: 'provider-1', teamDomain: 'team.cloudflareaccess.com' };
 export const reply = result => Response.json({ success: true, result, result_info: { total_pages: 1 } });
-export async function listen(server) { server.listen(0, '127.0.0.1'); await once(server, 'listening'); return server.address().port; }
+export async function listen(server, host = '127.0.0.1') { server.listen(0, host); await once(server, 'listening'); return server.address().port; }
 export async function freePort() { const s = createServer(); const port = await listen(s); await new Promise(r => s.close(r)); return port; }
 export function http(port, { path = '/', method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -14,7 +14,7 @@ export function http(port, { path = '/', method = 'GET', headers = {}, body } = 
     }); req.on('error', reject); req.end(body);
   });
 }
-export async function dshFixture() {
+export async function dshFixture({ host = '127.0.0.1' } = {}) {
   const calls = [], sockets = new Set(), trusted = new Set();
   let launch = 'process-secret-one', exchanges = 0;
   const cookie = host => `dsh-auth-fixture=${createHash('sha256').update(host + launch).digest('hex')}`;
@@ -39,10 +39,10 @@ export async function dshFixture() {
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     if (head.length) socket.write(head); socket.on('data', c => socket.write(c)); socket.on('error', () => {});
   });
-  const port = await listen(server);
+  const port = await listen(server, host);
   const connection = { authenticatedUrl: base => `${base}?token=${launch}`, requestRejection: ({ headers }) => trusted.has(headers.host) ? 401 : 403 };
   const entry = { options: { name: '@deepseek-ai/dsh-client-connection' } }; let raw = { recovery: { retries: 3 }, trustedHosts: ['keep.example.com'] };
-  const services = { connection, webServer: { host: '127.0.0.1', port, protocol: 'http:' }, configEditor: { entries: () => [entry], edit: async (_entry, change) => { raw = change(raw); raw.trustedHosts.forEach(h => trusted.add(h)); } } };
+  const services = { connection, webServer: { host, port, protocol: 'http:' }, configEditor: { entries: () => [entry], edit: async (_entry, change) => { raw = change(raw); raw.trustedHosts.forEach(h => trusted.add(h)); } } };
   return { calls, trusted, port, ctx: { get: k => services[k] }, get raw() { return raw; }, get exchanges() { return exchanges; }, rotate: () => { launch = 'process-secret-two'; }, close: async () => { for (const s of sockets) s.destroy(); await new Promise(r => server.close(r)); } };
 }
 export function memoryStore() {

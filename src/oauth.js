@@ -10,14 +10,16 @@ const equal = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer
 /** Public-client PKCE only. Management grants live in memory, never in the status snapshot. */
 export class OAuth {
   constructor({ fetchImpl = fetch, onToken = () => {}, onState = () => {} } = {}) {
-    this.fetch = fetchImpl; this.onToken = onToken; this.onState = onState; this.pending = null; this.server = null; this.grantClientId = null;
+    this.fetch = fetchImpl; this.onToken = onToken; this.onState = onState; this.pending = null; this.server = null; this.grantClientId = null; this.generation = 0;
   }
   async begin({ clientId, scopes, port = 8789 }) {
     demand(typeof clientId === 'string' && /^[A-Za-z0-9_-]{8,200}$/.test(clientId), 'OAUTH_CLIENT', 'Register a public Cloudflare OAuth client or configure your own Client ID first.');
     demand(Array.isArray(scopes) && scopes.length > 0 && scopes.every(s => typeof s === 'string' && /^[A-Za-z0-9._-]{1,180}$/.test(s)), 'OAUTH_SCOPES', 'Enter the exact scope IDs registered for this OAuth client.');
     demand(!scopes.some(s => s === 'offline_access' || s === 'offline'), 'OAUTH_SCOPES', 'Persistent refresh grants are not requested by this plugin.');
     demand(Number.isInteger(port) && port >= 1024 && port <= 65535, 'OAUTH_PORT', 'Choose a loopback callback port between 1024 and 65535.');
-    await this.cancel();
+    const generation = ++this.generation;
+    await this.clearAttempt();
+    demand(generation === this.generation, 'OAUTH_EXPIRED', 'This authorization was superseded or cancelled.');
     const verifier = nonce(); const state = nonce();
     const redirectUri = `http://127.0.0.1:${port}/dsh-cf/oauth/callback`;
     const server = createServer((req, res) => {
@@ -27,10 +29,24 @@ export class OAuth {
       if (incoming.pathname !== '/dsh-cf/oauth/callback') return reply(404, 'Not found.');
       void this.finish(incoming.href).then(() => reply(200, 'Cloudflare connected. Return to DeepSeek Harness.')).catch(() => reply(400, 'Authorization was not completed. Return to DSH and retry.'));
     });
-    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
     this.server = server;
-    const timer = setTimeout(() => { void this.cancel(); this.onState('expired'); }, 5 * 60_000); timer.unref();
-    this.pending = { state, verifier, clientId, redirectUri, expires: Date.now() + 5 * 60_000, timer, used: false, abort: new AbortController(), server };
+    const pending = { state, verifier, clientId, redirectUri, expires: Date.now() + 5 * 60_000, timer: null, used: false, abort: new AbortController(), server };
+    this.pending = pending; // Own the listener before listen() can yield to cancellation.
+    try {
+      await new Promise((resolve, reject) => {
+        const finish = error => { server.removeListener('error', failed); pending.abort.signal.removeEventListener('abort', aborted); error ? reject(error) : resolve(); };
+        const failed = error => finish(error);
+        const aborted = () => finish(pending.abort.signal.reason);
+        server.once('error', failed); pending.abort.signal.addEventListener('abort', aborted, { once: true });
+        server.listen({ port, host: '127.0.0.1', signal: pending.abort.signal }, () => finish());
+      });
+      pending.abort.signal.throwIfAborted();
+      demand(generation === this.generation && this.pending === pending, 'OAUTH_EXPIRED', 'This authorization was superseded or cancelled.');
+    } catch (error) {
+      if (this.pending === pending) await this.cancel();
+      throw error;
+    }
+    pending.timer = setTimeout(() => { if (this.pending === pending) { void this.cancel(); this.onState('expired'); } }, 5 * 60_000); pending.timer.unref();
     const url = new URL(AUTH);
     for (const [key, value] of Object.entries({ response_type: 'code', client_id: clientId, redirect_uri: redirectUri, scope: scopes.join(' '), state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' })) url.searchParams.set(key, value);
     this.onState('waiting');
@@ -80,9 +96,13 @@ export class OAuth {
     demand(response.ok, 'OAUTH_REVOKE', 'Cloudflare did not confirm grant revocation. The local grant can still be forgotten.');
   }
   async cancel() {
-    if (this.pending) { clearTimeout(this.pending.timer); this.pending.abort.abort(new DOMException('Cancelled', 'AbortError')); }
-    this.pending = null;
+    this.generation++;
+    await this.clearAttempt();
+  }
+  async clearAttempt() {
+    const pending = this.pending; this.pending = null;
     const server = this.server; this.server = null;
+    if (pending) { clearTimeout(pending.timer); pending.abort.abort(new DOMException('Cancelled', 'AbortError')); }
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
   }
 }

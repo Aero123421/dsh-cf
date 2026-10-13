@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, chmod, stat, rm, mkdir, utimes } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, chmod, stat, rm, mkdir, utimes, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -36,8 +36,8 @@ test('a previously confirmed host identity is accepted again without a new revie
   const reopened = await new Store(dir).open(); t.after(() => reopened.close()); assert.equal(reopened.state.hostReview, undefined);
 });
 test('a stale lock is reclaimed without stealing a live new lock', async t => {
-  const dir = await directory(t); await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: 2147483647, nonce: 'old' }));
-  const store = await new Store(dir).open(); t.after(() => store.close());
+  const dir = await directory(t); await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: 2147483647, nonce: 'old', heartbeatMs: 50 }));
+  const store = await new Store(dir, { heartbeatMs: 50 }).open(); t.after(() => store.close());
   assert.notEqual(JSON.parse(await readFile(join(dir, 'owner.lock'))).nonce, 'old'); await assert.rejects(new Store(dir).open(), { code: 'LOCK' });
 });
 // A live owner refreshes owner.lock's mtime every heartbeat; tests use a short heartbeat.
@@ -47,7 +47,7 @@ test('a lock with our PID but no heartbeat (crashed run, container restart) is r
   const started = Date.now(); const store = await new Store(dir, { heartbeatMs: 50 }).open(); t.after(() => store.close());
   assert.notEqual(JSON.parse(await readFile(join(dir, 'owner.lock'))).nonce, 'previous-container-run'); assert(Date.now() - started >= 70);
 });
-test('a long-silent lock is reclaimed immediately even if its PID now belongs to another process', async t => {
+test('a long-silent lock is reclaimed after observation even if its PID now belongs to another process', async t => {
   const dir = await directory(t); const { spawn } = await import('node:child_process');
   const other = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' }); t.after(() => other.kill('SIGKILL'));
   const path = join(dir, 'owner.lock'); await writeFile(path, JSON.stringify({ pid: other.pid, nonce: 'reused-pid', heartbeatMs: 50 }));
@@ -55,15 +55,52 @@ test('a long-silent lock is reclaimed immediately even if its PID now belongs to
   const store = await new Store(dir, { heartbeatMs: 50 }).open(); t.after(() => store.close());
   assert.notEqual(JSON.parse(await readFile(path)).nonce, 'reused-pid');
 });
-test('a heartbeating lock is refused, whether its PID is another process or equal to ours (another PID namespace)', async t => {
+test('a heartbeating lock is refused for live, equal and nonexistent PIDs (other PID namespaces)', async t => {
   const dir = await directory(t); const { spawn } = await import('node:child_process');
   const other = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' }); t.after(() => other.kill('SIGKILL'));
   const path = join(dir, 'owner.lock'); beat(t, path);
-  for (const pid of [other.pid, process.pid]) {
+  for (const pid of [other.pid, process.pid, 2147483647]) {
     await writeFile(path, JSON.stringify({ pid, nonce: `live-${pid}`, heartbeatMs: 50 }));
     await assert.rejects(new Store(dir, { heartbeatMs: 50 }).open(), { code: 'LOCK' });
     assert.equal(JSON.parse(await readFile(path)).nonce, `live-${pid}`);
   }
+});
+test('ownership loss stops lease renewal and refuses persistent state/token writes', async t => {
+  const dir = await directory(t); const store = await new Store(dir, { heartbeatMs: 20 }).open(); t.after(() => store.close());
+  let lost = 0; store.onOwnershipLost = () => { lost++; };
+  const path = join(dir, 'owner.lock'); await rm(path); await writeFile(path, JSON.stringify({ pid: process.pid, nonce: 'new-owner', heartbeatMs: 20 }));
+  const mtime = (await stat(path)).mtimeMs;
+  for (let i = 0; !lost && i < 100; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(lost, 1); assert.equal(store.ownershipLost, true); assert.equal((await stat(path)).mtimeMs, mtime);
+  const original = await readFile(join(dir, 'state.json'), 'utf8'); store.state.gatePort = 9876;
+  await assert.rejects(store.save(), { code: 'LOCK' });
+  await assert.rejects(store.writeToken('new-token-must-not-be-written'), { code: 'LOCK' });
+  await assert.rejects(store.clearToken(), { code: 'LOCK' });
+  assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), original);
+  await store.close(); assert.equal(JSON.parse(await readFile(path, 'utf8')).nonce, 'new-owner');
+});
+test('changing lock identity during reclamation preserves the replacement owner', async t => {
+  const dir = await directory(t), path = join(dir, 'owner.lock');
+  await writeFile(path, JSON.stringify({ pid: 2147483647, nonce: 'old-owner', heartbeatMs: 50 }));
+  const opening = new Store(dir, { heartbeatMs: 50 }).open(); const rejected = assert.rejects(opening, { code: 'LOCK' });
+  await new Promise(r => setTimeout(r, 20)); await writeFile(path, JSON.stringify({ pid: process.pid, nonce: 'replacement-owner', heartbeatMs: 50 }));
+  await rejected; assert.equal(JSON.parse(await readFile(path, 'utf8')).nonce, 'replacement-owner');
+});
+for (const kind of ['state', 'token']) test(`ownership loss while staging a ${kind} write prevents its commit`, async t => {
+  const dir = await directory(t), store = await new Store(dir).open(); t.after(() => store.close());
+  await store.writeToken('original-private-token-123456789');
+  const path = join(dir, kind === 'state' ? 'state.json' : 'tunnel.token'); const original = await readFile(path, 'utf8');
+  const handle = await open(path, 'r'), prototype = Object.getPrototypeOf(handle), sync = prototype.sync; await handle.close();
+  let entered, release; const staging = new Promise(r => { entered = r; }), waiting = new Promise(r => { release = r; }); t.after(() => release());
+  t.mock.method(prototype, 'sync', async function () { entered(); await waiting; return sync.call(this); });
+  store.state.gatePort = 5678;
+  const writing = kind === 'state' ? store.save() : store.writeToken('replacement-old-owner-token-123456');
+  const rejected = assert.rejects(writing, { code: 'LOCK' });
+  await staging;
+  await rm(join(dir, 'owner.lock')); await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: process.pid, nonce: 'replacement-owner', heartbeatMs: 50 }));
+  await store.refreshLease(); assert.equal(store.ownershipLost, true);
+  release(); await rejected;
+  assert.equal(await readFile(path, 'utf8'), original);
 });
 test('an open store keeps its lease alive so a second process would see a heartbeat', async t => {
   const dir = await directory(t); const store = await new Store(dir, { heartbeatMs: 30 }).open(); t.after(() => store.close());
@@ -132,5 +169,20 @@ test('guardian starts a real fixture child with the exact argv and stops only th
   const argv = JSON.parse(await readFile(argvFile, 'utf8'));
   assert.deepEqual(argv, connectorArgs(argv[3], tokenFile)); assert.match(argv[3], /config\.yml$/);
   const pid = Number(await readFile(pidFile));
-  await connector.stop(); assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  await connector.stop(); assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }); assert.equal(statuses.at(-1), 'stopped'); assert(!statuses.includes('error'));
+});
+for (const code of [0, 1]) test(`unexpected connector exit ${code} remains an error through guardian cleanup`, unix, async t => {
+  const dir = await directory(t), binary = join(dir, 'exiting-cloudflared');
+  await writeFile(binary, `#!/usr/bin/env node\nconsole.error(JSON.stringify({message:'Registered tunnel connection'}));setTimeout(()=>process.exit(${code}),50);\n`, { mode: 0o700 });
+  const statuses = [], connector = new Connector(s => statuses.push(s)); t.after(() => connector.stop());
+  await connector.start(binary, join(dir, 'tunnel.token'));
+  for (let i = 0; connector.process && i < 200; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(connector.process, null); assert(statuses.includes('connected')); assert.equal(statuses.at(-1), 'error');
+  assert(!statuses.slice(statuses.indexOf('error')).includes('stopped'));
+});
+test('a connector spawn failure is terminal rather than a normal stop', async t => {
+  const dir = await directory(t), statuses = [], connector = new Connector(s => statuses.push(s)); t.after(() => connector.stop());
+  await connector.start(join(dir, 'missing-cloudflared'), join(dir, 'tunnel.token'));
+  for (let i = 0; connector.process && i < 200; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(connector.process, null); assert.equal(statuses.at(-1), 'error');
 });

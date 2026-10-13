@@ -76,11 +76,21 @@ export class Gate {
     demand(!this.closing && identity && Number.isFinite(identity.expiresAt) && identity.expiresAt > Date.now(), 'AUTH', 'Authentication expired.');
     return { identity, url };
   }
+  reserve(emitter) {
+    if (this.requests >= 64) return null;
+    this.requests++;
+    let pending = true, closed = emitter.destroyed, released = false;
+    const release = () => { if (closed && !pending && !released) { released = true; this.requests--; } };
+    emitter.once('close', () => { closed = true; release(); });
+    // A disconnected client must not free capacity while its authentication/session work is pending.
+    return () => { pending = false; release(); };
+  }
   async http(req, res) {
-    if (this.requests >= 64) return denied(res, 503, 'Too many active requests.', this.instanceId);
-    this.requests++; res.once('close', () => { this.requests--; });
+    const admitted = this.reserve(res);
+    if (!admitted) return denied(res, 503, 'Too many active requests.', this.instanceId);
     try {
       const { identity, url } = await this.authenticate(req, false);
+      if (res.destroyed) return;
       if (url.pathname === VERIFY_PATH) {
         demand(req.method === 'GET' && url.searchParams.get('challenge') === this.proofNonce, 'PROOF', 'Open the current verification link from DSH settings.');
         // Prove normal DSH authentication before making any application route usable.
@@ -129,19 +139,25 @@ export class Gate {
       if (res.headersSent) return res.destroy();
       const status = e instanceof CfError && e.code === 'BODY' ? 413 : e instanceof CfError && ['HOST', 'ORIGIN', 'PATH', 'MANAGEMENT'].includes(e.code) ? 403 : 401;
       denied(res, status, status === 403 ? 'Request not permitted.' : 'Access or DSH verification required.', this.instanceId);
-    }
+    } finally { admitted(); }
   }
   async upgrade(req, socket, head) {
     socket.on('error', () => {});
+    socket.once('end', () => socket.destroy()); // An upgraded HTTP socket may otherwise stay half-open.
+    // Share HTTP's budget and reserve before authentication/session exchange can yield.
+    const admitted = this.reserve(socket);
+    if (!admitted) { socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'); return; }
     let identity, url;
     try {
-      demand(this.active.size < 64 && String(req.headers.upgrade).toLowerCase() === 'websocket', 'UPGRADE', 'Unsupported upgrade.');
+      demand(String(req.headers.upgrade).toLowerCase() === 'websocket', 'UPGRADE', 'Unsupported upgrade.');
       ({ identity, url } = await this.authenticate(req, true));
       demand(this.enabled, 'PROOF', 'Verification required.');
-    } catch { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return; }
+    } catch { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); admitted(); return; }
     try {
+      if (socket.destroyed || this.closing) return;
       const [target, cookie] = await Promise.all([this.adapter.target(this.host), this.adapter.cookie(this.host)]);
       if (socket.destroyed || this.closing) return;
+      demand(identity.expiresAt > Date.now(), 'AUTH', 'Authentication expired during session exchange.');
       const transport = target.protocol === 'https:' ? httpsRequest : httpRequest;
       const request = transport({ ...target, method: 'GET', path: `${url.pathname}${url.search}`, headers: cleanHeaders(req.headers, { host: this.host, cookie, upgrade: true }) });
       let remote;
@@ -164,6 +180,7 @@ export class Gate {
       request.once('response', response => { if (response.statusCode === 401) this.adapter.invalidate(); response.resume(); stop(); });
       request.once('error', stop); request.end();
     } catch { socket.destroy(); }
+    finally { admitted(); }
   }
   async close() {
     this.closing = true; this.enabled = false;

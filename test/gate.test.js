@@ -6,12 +6,25 @@ import { Gate, browserFence, DIAGNOSTIC_PATH } from '../src/gate.js';
 import { DshAdapter } from '../src/dsh.js';
 import { HOST, http, dshFixture } from './helpers.js';
 const headers = { host: HOST, origin: `https://${HOST}`, 'cf-access-jwt-assertion': 'owner-test-jwt', 'sec-fetch-site': 'same-origin' };
-async function fixture(t, options = {}) {
-  const upstream = await dshFixture(); const adapter = new DshAdapter(upstream.ctx); await adapter.trust(HOST);
+async function fixture(t, { upstreamHost = '127.0.0.1', ...options } = {}) {
+  const upstream = await dshFixture({ host: upstreamHost }); const adapter = new DshAdapter(upstream.ctx); await adapter.trust(HOST);
   const evidence = [];
   const gate = new Gate({ host: HOST, instanceId: 'instance-test', adapter, verify: async token => { assert.equal(token, 'owner-test-jwt'); return { expiresAt: Date.now() + 60_000 }; }, onEvidence: x => evidence.push(x), ...options });
   await gate.start(); t.after(async () => { await gate.close(); await upstream.close(); });
   return { upstream, adapter, gate, evidence, activate: () => http(gate.port, { path: `${DIAGNOSTIC_PATH}?challenge=${gate.proofNonce}`, headers }) };
+}
+async function until(check) {
+  for (let i = 0; !check() && i < 200; i++) await new Promise(r => setTimeout(r, 10));
+  assert(check(), 'condition did not complete');
+}
+function websocket(port) {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path: '/api/stream', headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13' } });
+    req.once('error', reject);
+    req.once('upgrade', (response, socket) => { socket.on('error', () => {}); resolve({ status: response.statusCode, socket }); });
+    req.once('response', response => { response.resume(); response.once('end', () => resolve({ status: response.statusCode })); });
+    req.end();
+  });
 }
 for (const [name, patch] of [
   ['wrong Host', { headers: { ...headers, host: 'evil.example.com' } }],
@@ -99,6 +112,70 @@ test('WebSocket handshake and bytes traverse authenticated gate; close tears dow
   assert.equal(response.statusCode, 101); assert(f.evidence.includes('websocket'));
   const next = once(socket, 'data'); socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69])); assert.deepEqual((await next)[0], Buffer.from([0x81, 0x02, 0x68, 0x69]));
   const closed = once(socket, 'close'); await f.gate.close(); await closed;
+});
+test('parallel WebSocket authentication reserves at most 64 slots and releases them on close', async t => {
+  const f = await fixture(t); await f.activate();
+  let release, verifying = 0, rejected = 0; const waiting = new Promise(r => { release = r; });
+  f.gate.verify = async () => { verifying++; await waiting; return { expiresAt: Date.now() + 60_000 }; };
+  t.after(() => release());
+  const attempts = Array.from({ length: 80 }, () => websocket(f.gate.port).then(r => { if (r.status === 503) rejected++; return r; }));
+  await until(() => rejected === 16 && verifying === 64);
+  assert.equal(f.gate.requests, 64); release();
+  const results = await Promise.all(attempts); assert.equal(results.filter(r => r.status === 101).length, 64);
+  assert.equal(f.gate.active.size, 64);
+  for (const result of results) result.socket?.destroy();
+  await until(() => f.gate.requests === 0 && f.gate.active.size === 0);
+  assert.equal((await http(f.gate.port, { headers })).status, 200);
+});
+test('WebSockets share the HTTP budget and failed authentication releases reservations', async t => {
+  const f = await fixture(t); await f.activate();
+  let release, verifying = 0; const waiting = new Promise(r => { release = r; });
+  f.gate.verify = async () => { verifying++; await waiting; throw new Error('invalid JWT'); }; t.after(() => release());
+  const requests = Array.from({ length: 64 }, () => http(f.gate.port, { headers }));
+  await until(() => verifying === 64);
+  assert.equal((await websocket(f.gate.port)).status, 503); assert.equal(verifying, 64);
+  release(); assert((await Promise.all(requests)).every(r => r.status === 401));
+  await until(() => f.gate.requests === 0);
+  assert.equal((await websocket(f.gate.port)).status, 401);
+  await until(() => f.gate.requests === 0);
+});
+test('disconnecting during WebSocket authentication does not release unfinished admission work', async t => {
+  const f = await fixture(t); await f.activate();
+  let release, verifying = 0; const waiting = new Promise(r => { release = r; });
+  f.gate.verify = async () => { verifying++; await waiting; return { expiresAt: Date.now() + 60_000 }; }; t.after(() => release());
+  const clients = Array.from({ length: 64 }, () => {
+    const req = request({ host: '127.0.0.1', port: f.gate.port, path: '/api/stream', headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket' } });
+    req.on('error', () => {}); req.end(); return req;
+  });
+  await until(() => verifying === 64); for (const req of clients) req.destroy();
+  await until(() => f.gate.sockets.size === 0);
+  assert.equal(f.gate.requests, 64, 'pending verification retains its reservation after disconnect');
+  assert.equal((await websocket(f.gate.port)).status, 503); assert.equal(verifying, 64);
+  const calls = f.upstream.calls.length; release(); await until(() => f.gate.requests === 0);
+  assert.equal(f.upstream.calls.length, calls, 'closed clients do not start a session exchange');
+});
+test('WebSocket JWT expiry during a delayed session exchange cannot reach upstream', async t => {
+  const f = await fixture(t); await f.activate();
+  let release, exchanging = false; const waiting = new Promise(r => { release = r; });
+  const identity = { expiresAt: Date.now() + 60_000 }; f.gate.verify = async () => identity;
+  f.adapter.cookie = async () => { exchanging = true; await waiting; return 'dsh-auth-fixture=unused'; }; t.after(() => release());
+  const attempt = websocket(f.gate.port).catch(() => null);
+  await until(() => exchanging); identity.expiresAt = Date.now() - 1; release(); await attempt;
+  await until(() => f.gate.requests === 0);
+  assert(!f.upstream.calls.some(c => c.upgrade));
+});
+for (const upstreamHost of ['127.0.0.1', '::1', 'localhost']) test(`DSH cookie exchange and HTTP/WS forwarding work with ${upstreamHost} listener`, async t => {
+  const f = await fixture(t, { upstreamHost });
+  assert.equal((await f.activate()).status, 200);
+  assert.equal((await http(f.gate.port, { path: '/api/read', headers })).status, 200);
+  const ws = await websocket(f.gate.port); assert.equal(ws.status, 101); ws.socket.destroy();
+  assert.equal(f.upstream.exchanges, 1);
+  assert.equal(f.upstream.calls.at(-1).headers.host, HOST);
+});
+test('localhost lookup supplies only IPv4/IPv6 loopback addresses', async t => {
+  const f = await fixture(t, { upstreamHost: 'localhost' }); const target = await f.adapter.target(HOST);
+  assert.equal(target.autoSelectFamily, true);
+  target.lookup('localhost', { all: true }, (error, addresses) => { assert.equal(error, null); assert.deepEqual(addresses, [{ address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 }]); });
 });
 test('expired JWT is rejected before DSH is contacted', async t => {
   const f = await fixture(t, { verify: async () => ({ expiresAt: Date.now() - 1 }) });

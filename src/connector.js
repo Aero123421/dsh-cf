@@ -130,18 +130,25 @@ export async function ensureBinary({ dir, selected = '', allowDownload = false, 
 
 /** A guardian kills only its own connector on parent IPC loss, including a crashed DSH host. */
 export class Connector {
-  constructor(onStatus = () => {}) { this.onStatus = onStatus; this.process = null; }
+  constructor(onStatus = () => {}) { this.onStatus = onStatus; this.process = null; this.stopping = false; this.failed = false; }
   async start(binary, tokenFile) {
     demand(!this.process, 'CONNECTOR_RUNNING', 'A connector is already running.');
+    this.stopping = false; this.failed = false;
     const child = fork(fileURLToPath(new URL('./guardian.js', import.meta.url)), [], { env: { ...childEnv(), ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }, execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true });
     this.process = child;
-    child.on('message', value => { if (value?.type === 'status' && ['starting', 'connected', 'disconnected', 'error', 'stopped'].includes(value.status)) this.onStatus(value.status); });
-    child.on('error', () => this.onStatus('error'));
-    child.once('exit', () => { if (this.process === child) { this.process = null; this.onStatus('stopped'); } });
+    const report = status => {
+      if (this.process !== child) return;
+      if (status === 'error' || (status === 'stopped' && !this.stopping)) this.failed = true;
+      this.onStatus(this.failed ? 'error' : status);
+    };
+    child.on('message', value => { if (value?.type === 'status' && ['starting', 'connected', 'disconnected', 'error', 'stopped'].includes(value.status)) report(value.status); });
+    child.on('error', () => report('error'));
+    child.once('exit', () => { if (this.process === child) { report(this.stopping ? 'stopped' : 'error'); this.process = null; } });
     child.send({ type: 'start', binary, tokenFile });
   }
   async stop() {
     const child = this.process; if (!child) return;
+    this.stopping = true;
     await new Promise(resolve => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 12_000); timer.unref();
       child.once('exit', () => { clearTimeout(timer); resolve(); });

@@ -42,6 +42,34 @@ test('cancelled flow cannot install a late management token', async t => {
   await f.oauth.cancel(); resolveFetch(Response.json({ access_token: 'late-management-secret', token_type: 'Bearer', expires_in: 300 }));
   await assert.rejects(result); assert.equal(f.tokens.length, 0);
 });
+test('cancel invalidates OAuth initiation before its first await completes', async t => {
+  const oauth = new OAuth(); t.after(() => oauth.cancel()); const port = await freePort();
+  const starting = oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+  const rejected = assert.rejects(starting, { code: 'OAUTH_EXPIRED' });
+  await oauth.cancel(); await rejected;
+  assert.equal(oauth.pending, null); assert.equal(oauth.server, null);
+  // The cancelled attempt must not retain the callback port or prevent a legitimate retry.
+  const flow = await oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+  assert.equal(flow.redirectUri, `http://127.0.0.1:${port}/dsh-cf/oauth/callback`);
+});
+test('cancel during callback listener startup rejects initiation and frees the port', async t => {
+  const oauth = new OAuth(); t.after(() => oauth.cancel()); const port = await freePort();
+  const starting = oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+  const rejected = assert.rejects(starting);
+  for (let i = 0; !oauth.pending && i < 20; i++) await Promise.resolve();
+  assert(oauth.pending, 'the starting listener is registered before listen completion');
+  await oauth.cancel(); await rejected;
+  assert.equal(oauth.pending, null); assert.equal(oauth.server, null);
+  await oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+});
+test('concurrent OAuth starts retain only the newest attempt', async t => {
+  const oauth = new OAuth(); t.after(() => oauth.cancel()); const port = await freePort();
+  const old = oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+  const rejected = assert.rejects(old, { code: 'OAUTH_EXPIRED' });
+  const flow = await oauth.begin({ clientId: 'new-public-client-123', scopes: ['registered.scope'], port });
+  await rejected; assert.equal(oauth.pending.clientId, 'new-public-client-123');
+  assert.equal(oauth.pending.redirectUri, flow.redirectUri);
+});
 test('an older cancelled exchange cannot close a newer callback listener', async t => {
   let resolveFetch; const f = await begin(t, { fetchImpl: () => new Promise(r => { resolveFetch = r; }) });
   const old = f.oauth.finish(callback(f.flow)); await f.oauth.cancel();
