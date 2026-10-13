@@ -1,0 +1,52 @@
+# Security model
+
+This is an unaudited alpha plugin for a **single trusted DSH operator**. DSH can execute programs and access the host's files. Granting access is effectively granting operator control, not a read-only chat account.
+
+## Trust boundaries
+
+The browser trusts Cloudflare TLS, Access, its configured identity provider and MFA policy. Cloudflare terminates public TLS and can inspect or modify web traffic: **this is not end-to-end encryption against Cloudflare**. The local proxy verifies an RS256 app JWT against a pinned team issuer/JWKS URL, exact application audience, required claims, expiration, and one owner email. It never trusts an email header by itself.
+
+Cloudflare's API account and zone are explicitly selected. Provisioning refuses preexisting DNS records, overlapping Access apps, unexpected policy changes, and unknown POST outcomes. A separate per-instance tunnel is used, not a replica of an unrelated machine. Configuration contains no paid-service activation calls.
+
+The proxy preserves public Host and same-origin browser checks. DSH's own launch-token exchange runs only over its loopback listener. Its signed cookie is kept in server memory and stripped from public response headers. The DSH signing secret is never accessed. DSH private implementation objects are not patched.
+
+## Administrative and runtime credentials
+
+OAuth uses S256 PKCE, an unpredictable state, an exact registered callback, five-minute initiation expiry, and single-use exchange. A cancelled/older attempt cannot install a late grant or close a newer listener. Headless callback recovery must use the already trusted original DSH connection. Client secrets and persistent refresh grants are not used.
+
+Cloudflare management grants are memory-only. The dedicated Tunnel token is stored as a restricted file; it is **not encrypted with an OS keychain**. No secrets are returned by the status API, put in public DSH URLs, printed by logging code, or passed as command-line argument values. The child connector receives an allowlisted environment rather than model/API credentials.
+
+Original authenticated DSH callers can manage the plugin. The public gate permits only the sanitized `/dsh-cf/status` endpoint from its management channel; all mutations in that channel are blocked, including encoded aliases. This is not a separate privilege boundary against DSH's own operator capabilities: an authenticated DSH operator can run commands and change files. Do not assume the plugin protects the Cloudflare token from other plugins or malicious code executed by that same OS user.
+
+## Streams, cookies, and revocation
+
+Every new HTTP/WS request is checked. State-changing HTTP and WS requests require the exact browser Origin. Cross-site GET navigation is allowed only at safe entry/verification documents. Incoming cookies/Authorization/forwarded metadata are not used as DSH credentials. The upstream signed cookie is injected after JWT validation.
+
+Uploads are bounded to 100 MiB, header bytes and concurrency are bounded, streams are forwarded with backpressure. WS/SSE/HTTP streams close on the earlier of JWT expiration or 15 minutes. The plugin does not replay writes after an upstream failure. Stop closes existing sockets and the owned connector. A guardian notices parent IPC loss and terminates its own child after a DSH crash.
+
+A locally valid JWT does **not** prove the current Cloudflare policy has not just changed. Independent MFA is enforced by Cloudflare; the gate does not receive a cryptographic WebAuthn attestation from the browser. API settings are checked during provisioning, not continuously on every request or offline resume. Edge logout/revocation may not instantly end an established stream. For immediate local revocation, stop this plugin; then revoke Cloudflare sessions/tokens and rotate credentials as needed. An existing local DSH session has separate lifetime and ownership.
+
+## Supply chain and files
+
+The bundled source executes no install/prepare hook. The only application dependency is the pinned `jose` package. The lock points to its immutable official v6.2.12 release tarball and published SHA-256. Audit the dependency and verify `npm ci && npm run check` in a connected environment before release.
+
+cloudflared private downloads use a pinned release version and official release digest, checked before extraction/execution. This trusts Cloudflare's GitHub release account/API and GitHub TLS. It is not independent signature verification. Its executable cache is checked before reuse. Explicit user-selected or previously installed binaries remain the user's trust decision. Existing services, configuration files and other tunnels are not reconfigured.
+
+State/token files are scoped to the active profile, written atomically with POSIX mode 0600 under a 0700 directory. Windows ACLs require environment review. Root/admin access, filesystem snapshots, backups, the same OS user, malicious extensions, and a compromised DSH/runtime can expose these files or process memory. Keep state and token files out of git and shared folders.
+
+## Required live tests before release
+
+The first implementation has not passed real Cloudflare/DSH/OS end-to-end validation. In particular:
+
+- Install the declared `jose` dependency and run the actual RSA/JWT tests without the offline opt-out.
+- Confirm OAuth registration accepts the intended callback and granted scopes, including headless setup.
+- Confirm the current Cloudflare API accepts and read-backs organization/app/policy independent MFA fields exactly as implemented; verify no IdP shortcut weakens the intended WebAuthn requirement.
+- Check denial, normal owner login, incorrect user, expiry, token/key rotation, logout, revoked sessions, and all document/API/WS/file surfaces in actual DSH.
+- Test DSH configEditor reloading, profile persistence, Desktop's dynamic port, Electron child processes, crash recovery, and coexistence with another installed Tunnel on each supported OS.
+- Exercise iPadOS/Safari and credential recovery. Use at least a second registered authenticator/appropriate IdP recovery, managed in Access.
+
+Do not add bypasses to work around a failed integration test. Leave publication stopped, report the failing boundary, and fix the integration.
+
+## Reporting
+
+Do not publish live tokens, callback URLs, cookies, private files, or exploitable proof against deployed installations in a public issue. Prefer GitHub private vulnerability reporting if enabled; otherwise ask the maintainer for a private reporting channel without including exploit details. No formal audit or response SLA is claimed.
