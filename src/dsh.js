@@ -3,6 +3,13 @@ import { request as httpsRequest } from 'node:https';
 import { readFile } from 'node:fs/promises';
 import { CfError, demand, digest } from './common.js';
 
+// Node can bind localhost to either family. Never resolve a launch-token request off loopback.
+function loopbackLookup(_host, options, callback) {
+  const addresses = [{ address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 }].filter(a => !options.family || a.family === options.family);
+  if (options.all) callback(null, addresses);
+  else callback(null, addresses[0].address, addresses[0].family);
+}
+
 /** Use only supported DSH seams; never read its signing secret or mutate internal services. */
 export class DshAdapter {
   constructor(ctx, config = {}) { this.ctx = ctx; this.config = config; this.cached = null; this.loading = null; }
@@ -11,7 +18,7 @@ export class DshAdapter {
     demand(web && connection && typeof connection.authenticatedUrl === 'function' && typeof connection.requestRejection === 'function', 'DSH_API', 'This DSH build does not expose the required Web/Connection APIs.');
     demand(['127.0.0.1', 'localhost', '::1'].includes(web.host), 'DSH_BIND', 'Bind DSH to loopback before enabling remote access.');
     demand(Number.isInteger(web.port) && web.port > 0, 'DSH_PORT', 'DSH has not opened its Web listener yet.');
-    return { port: web.port, protocol: web.protocol, address: web.host === '::1' ? '::1' : '127.0.0.1', connection };
+    return { port: web.port, protocol: web.protocol, address: web.host, connection };
   }
   async trust(host) {
     const editor = this.ctx.get('configEditor');
@@ -44,7 +51,7 @@ export class DshAdapter {
     const facts = this.facts(); const secure = facts.protocol === 'https:';
     demand(facts.protocol === 'http:' || secure, 'DSH_TLS', 'Unsupported DSH listener protocol.');
     const ca = this.config.originCaFile ? await readFile(this.config.originCaFile) : undefined;
-    return { hostname: facts.address, port: facts.port, protocol: facts.protocol, ...(secure ? { servername: this.config.originServerName || publicHost, ...(ca ? { ca } : {}), rejectUnauthorized: true } : {}) };
+    return { hostname: facts.address, port: facts.port, protocol: facts.protocol, ...(facts.address === 'localhost' ? { lookup: loopbackLookup, autoSelectFamily: true } : {}), ...(secure ? { servername: this.config.originServerName || publicHost, ...(ca ? { ca } : {}), rejectUnauthorized: true } : {}) };
   }
   async cookie(publicHost) {
     const facts = this.facts(); const target = await this.target(publicHost);

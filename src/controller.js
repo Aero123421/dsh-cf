@@ -18,6 +18,10 @@ export class Controller {
     this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null;
     this.authGeneration = 0; this.evidence = {}; this.binary = null; this.disposed = false;
     this.oauth = new OAuth({ fetchImpl, onToken: async (token, until, signal) => this.authorized(token, until, 'oauth', signal), onState: status => { this.step('authorization', status === 'complete' ? 'done' : 'waiting', status); } });
+    store.onOwnershipLost = async () => {
+      try { await this.stop(); }
+      finally { this.phase = 'error'; this.error = { code: 'LOCK', message: 'Profile ownership was lost. Publication was stopped. Stop the other DSH before reopening this profile.' }; this.changed(); }
+    };
   }
   changed() { this.seq++; }
   step(id, status, message = '') {
@@ -156,8 +160,13 @@ export class Controller {
         if (this.connector !== connector) return;
         this.connectorStatus = status;
         if (status === 'connected') { this.step('tunnel', 'done', 'Connector registered with Cloudflare'); this.maybeReady(); }
-        if (['disconnected', 'error', 'stopped'].includes(status)) {
-          this.step('tunnel', status === 'error' ? 'error' : 'waiting', `Connector ${status}`);
+        if (status === 'error' || status === 'stopped') {
+          this.connectorStatus = 'error'; this.phase = 'error';
+          this.error = { code: 'CONNECTOR_EXIT', message: 'cloudflared stopped unexpectedly. Check the connector and reconnect from the local settings.' };
+          this.step('tunnel', 'error', this.error.message); this.changed();
+          void this.closeRuntime().catch(() => {});
+        } else if (status === 'disconnected') {
+          this.step('tunnel', 'waiting', 'Connector disconnected');
           if (this.phase === 'ready') this.phase = 'reconnecting';
           this.changed();
         }
@@ -172,6 +181,8 @@ export class Controller {
       }
       this.step('browser', 'working', 'Checking rejection without authentication');
       await this.negativeProbe(setup, signal);
+      signal.throwIfAborted();
+      demand(this.connector === connector && this.gate === gate && this.connectorStatus !== 'error', 'CONNECTOR_EXIT', 'cloudflared stopped during verification. Check the connector and reconnect from the local settings.');
       this.evidence.unauthenticatedRejected = true;
       this.phase = 'waiting-browser'; this.step('browser', this.evidence.owner ? 'done' : 'waiting', this.evidence.owner ? 'Signed owner identity verified' : 'Open the verification link and authenticate with Access');
       this.step('dsh', 'waiting', 'Waiting for real DSH HTTP, API, and WebSocket traffic');

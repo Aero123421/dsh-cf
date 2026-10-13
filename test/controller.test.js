@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller } from '../src/controller.js';
 import { CfError } from '../src/common.js';
-import { SETUP, AUD, HOST, fakeCloudflare, memoryStore } from './helpers.js';
+import { SETUP, AUD, HOST, fakeCloudflare, memoryStore, freePort } from './helpers.js';
 async function fixture(t, overrides = {}) {
   const store = memoryStore(), api = fakeCloudflare(); let gate, connector;
   const dependencies = {
@@ -42,6 +42,47 @@ test('stopping closes the gate and connector without deleting Cloudflare resourc
   const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
   const gate = f.gate, connector = f.connector; await f.controller.handle('stop');
   assert(gate.closed); assert(connector.stopped); assert.equal(f.store.state.owned.tunnelId, 'tunnel');
+});
+test('stop during OAuth initiation cannot leave a callback flow or install a grant', async t => {
+  const port = await freePort();
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, config: { oauthCallbackPort: port }, fetchImpl: () => { throw new Error('cancelled initiation must not fetch'); } });
+  t.after(() => controller.dispose());
+  const beginning = controller.handle('oauth/start', { clientId: 'test-public-client', scopes: ['test.scope'] });
+  const rejected = assert.rejects(beginning);
+  await controller.handle('stop'); await rejected;
+  assert.equal(controller.phase, 'stopped'); assert.equal(controller.oauth.pending, null); assert.equal(controller.oauth.server, null);
+  assert.equal(controller.snapshot().authorized, false);
+  await assert.rejects(controller.handle('oauth/finish', { redirectUrl: `http://127.0.0.1:${port}/dsh-cf/oauth/callback?code=late&state=late` }), { code: 'OAUTH_EXPIRED' });
+});
+test('temporary disconnection can recover, but fatal connector events close runtime and remain errors', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  for (const kind of ['owner', 'http', 'api', 'websocket']) f.gate.onEvidence(kind);
+  assert.equal(f.controller.phase, 'ready');
+  f.connector.status('disconnected'); assert.equal(f.controller.phase, 'reconnecting');
+  f.connector.status('connected'); assert.equal(f.controller.phase, 'ready');
+  const connector = f.connector, gate = f.gate;
+  connector.status('error'); connector.status('stopped'); connector.status('connected');
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.controller.phase, 'error'); assert.equal(f.controller.error.code, 'CONNECTOR_EXIT');
+  assert.equal(f.controller.snapshot().steps.find(s => s.id === 'tunnel').status, 'error'); assert(gate.closed); assert(connector.stopped);
+  await f.controller.handle('resume'); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'waiting-browser'); assert.equal(f.controller.error, null);
+});
+test('fatal connector exit during external verification cannot be overwritten by startup', async t => {
+  const f = await fixture(t); let release, probing = false;
+  f.controller.negativeProbe = async () => { probing = true; await new Promise(r => { release = r; }); };
+  await f.controller.handle('start', SETUP); const operation = f.controller.operation.promise;
+  for (let i = 0; !probing && i < 100; i++) await new Promise(r => setTimeout(r, 10));
+  assert(probing); const gate = f.gate, connector = f.connector;
+  connector.status('error'); connector.status('stopped'); release(); await operation;
+  assert.equal(f.controller.phase, 'error'); assert.equal(f.controller.error.code, 'CONNECTOR_EXIT'); assert(gate.closed); assert(connector.stopped);
+});
+test('losing profile ownership stops only the owned runtime and reports a lock error', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  const gate = f.gate, connector = f.connector;
+  await f.store.onOwnershipLost();
+  assert.equal(f.controller.phase, 'error'); assert.equal(f.controller.error.code, 'LOCK'); assert(gate.closed); assert(connector.stopped);
+  assert.equal(f.store.state.owned.tunnelId, 'tunnel');
 });
 test('auto-connect cannot be enabled until browser and real transport verification completes', async t => {
   const f = await fixture(t); await assert.rejects(f.controller.handle('autoconnect', { enabled: true }), { code: 'VERIFY_FIRST' });
