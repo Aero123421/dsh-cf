@@ -26,7 +26,7 @@ export async function apply(ctx, config = {}) {
         let value;
         if (endpoint === 'update-status') value = await updates.status(payload?.operationId);
         else if (endpoint === 'update-check') value = await updates.check(payload?.channel);
-        else if (endpoint === 'update-install') value = await updates.install(payload?.candidateId, payload?.operationId, payload?.channel);
+        else if (endpoint === 'update-install') value = await updates.install(payload?.candidateId, payload?.operationId, payload?.channel, payload?.profileKey);
         else { value = await controller.handle(endpoint, payload); if (endpoint === 'status') value = { ...value, version: VERSION, update: updates.view }; }
         return { ok: true, value };
       }

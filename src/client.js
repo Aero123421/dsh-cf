@@ -59,21 +59,22 @@ window.__ModuleLoader__.load({
             if (this.profileKey) try { const id = localStorage.getItem(this.storageKey('operation')); if (id && UPDATE_UUID.test(id)) this.operation = id; const channel = localStorage.getItem(this.storageKey('channel')); if (['stable', 'prerelease'].includes(channel)) this.channel = channel; } catch {}
             // Resolve identity before restoring an ID. An old profile's unknown
             // response is discarded and the current profile is queried afresh.
-            if (this.operation || changedProfile) return await this.status();
+            if (changedProfile && payload.operationId) return await this.status();
           }
           if (method === 'install' && value.status === 'failed' && !value.operation) this.remember(null);
           if (value.operation) this.remember(value.operation);
+          else if (method === 'status' && !payload.operationId && this.operation && value.status !== 'unavailable') return await this.call('status', { operationId: this.operation });
           this.channel ??= value.channel;
           this.publish(value.candidate && value.channel !== this.channel ? { ...value, status: 'idle', candidate: null, channel: this.channel } : { ...value, channel: this.channel });
         } catch { if (generation === this.generation) this.publish({ ...this.view, status: method === 'install' || this.operation ? 'unknown' : 'failed', reason: 'UPDATE_FAILURE' }); }
       }
-      status() { return this.call('status', this.operation ? { operationId: this.operation } : {}); }
+      status() { return this.call('status'); }
       select(channel) { this.channel = channel; try { localStorage.setItem(this.storageKey('channel'), channel); } catch {} this.publish({ ...this.view, channel, status: 'idle', candidate: null }); }
       async check() { if (this.busy || !this.profileKey) return; this.busy = true; this.remember(null); this.publish({ ...this.view, status: 'checking' }); try { await this.call('check', { channel: this.channel ?? this.view.channel }); } finally { this.busy = false; } }
       async install() {
         if (this.busy || !this.profileKey || this.view.status !== 'available' || !this.view.candidate) return;
         this.busy = true; const operationId = crypto.randomUUID(); this.remember(operationId);
-        const payload = { operationId, candidateId: this.view.candidate.id, channel: this.channel ?? this.view.channel };
+        const payload = { profileKey: this.profileKey, operationId, candidateId: this.view.candidate.id, channel: this.channel ?? this.view.channel };
         this.publish({ ...this.view, status: 'installing', operation: operationId });
         try { await this.call('install', payload); } finally { this.busy = false; }
       }

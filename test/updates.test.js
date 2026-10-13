@@ -47,9 +47,9 @@ test('Invalid metadata, channel mismatch, package identity, compatibility, redir
 test('Disabled bundle, explicit GitHub pin and outcome survive restart without touching cloud configuration', async t => {
   const { updates, calls, manager, dir } = await fixture(t), id = randomUUID();
   const checked = await updates.check('prerelease'); assert.equal(checked.status, 'available');
-  assert.equal((await updates.install(checked.candidate.id, id, 'prerelease')).status, 'restart-required');
+  assert.equal((await updates.install(checked.candidate.id, id, 'prerelease', updates.profileKey)).status, 'restart-required');
   assert.equal(calls[0].config.enabled, false); assert.equal(calls[0].config.requestId, id); assert.equal(calls[0].spec, `github:${REPO}#v${NEXT}`);
-  assert.equal((await updates.install(checked.candidate.id, id, 'prerelease')).status, 'restart-required'); assert.equal(calls.length, 1);
+  assert.equal((await updates.install(checked.candidate.id, id, 'prerelease', updates.profileKey)).status, 'restart-required'); assert.equal(calls.length, 1);
   const restarted = new Updates({ manager: () => manager, profileDir: dir, runtime: RUNTIME, version: NEXT });
   assert.equal((await restarted.status(id)).status, 'confirmed');
   const record = await readFile(join(dir, '.dsh-cf-updates', `${id}.json`), 'utf8'); assert(!record.includes('token')); assert(!record.includes('cloudflared'));
@@ -57,10 +57,10 @@ test('Disabled bundle, explicit GitHub pin and outcome survive restart without t
 test('Failed, cancelled, overridden, applied-with-old-runtime and wrong manifest versions stay distinct', async t => {
   for (const application of ['failed', 'cancelled', 'overridden', 'applied']) {
     const { updates } = await fixture(t, { result: { application, ...(application === 'cancelled' ? { packageResult: { exitCode: 130 } } : {}) } }), checked = await updates.check('prerelease');
-    assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease')).status, application === 'applied' ? 'restart-required' : application);
+    assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey)).status, application === 'applied' ? 'restart-required' : application);
   }
   const { updates } = await fixture(t, { result: { application: 'applied', version: '9.0.0' } }), checked = await updates.check('prerelease');
-  assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease')).status, 'unknown');
+  assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey)).status, 'unknown');
   assert.equal((await updates.check('stable')).status, 'unknown');
 });
 test('Optional manager/read-only/unsupported source leaves other plugin capabilities independent', async t => {
@@ -76,39 +76,39 @@ test('Pending result is protected across Clients and newer candidates; null reco
   const fetcher = async url => url.includes('/releases?') ? Response.json([release(version)]) : Response.json(pkg(version));
   const { updates, manager, dir } = await fixture(t, { fetcher, manager: { installBundle: async () => { installs++; throw Error('lost'); } } });
   const checked = await updates.check('prerelease'), id = randomUUID();
-  assert.equal((await updates.install(checked.candidate.id, id, 'prerelease')).status, 'unknown');
+  assert.equal((await updates.install(checked.candidate.id, id, 'prerelease', updates.profileKey)).status, 'unknown');
   version = '0.1.0-alpha.6';
   const next = new Updates({ manager: () => manager, profileDir: dir, runtime: RUNTIME, fetcher });
   assert.equal((await next.status(id)).status, 'unknown');
-  assert.equal((await next.install(checked.candidate.id, randomUUID(), 'prerelease')).status, 'unknown');
-  assert.equal((await next.check('prerelease')).status, 'unknown');
-  assert.equal((await next.install(checked.candidate.id, randomUUID(), 'prerelease')).status, 'unknown'); assert.equal(installs, 1);
+  assert.equal((await next.install(checked.candidate.id, randomUUID(), 'prerelease', next.profileKey)).status, 'unknown');
+  assert.equal((await next.check('prerelease', updates.profileKey)).status, 'unknown');
+  assert.equal((await next.install(checked.candidate.id, randomUUID(), 'prerelease', next.profileKey)).status, 'unknown'); assert.equal(installs, 1);
 });
 test('Different pending operation IDs are refused distinctly and no downgrade is offered or installed', async t => {
   let releaseInstall, announce;
   const started = new Promise(resolve => { announce = resolve; });
   const { updates } = await fixture(t, { manager: { installBundle: async () => { announce(); return new Promise(resolve => { releaseInstall = resolve; }); } } });
-  const checked = await updates.check('prerelease'), first = updates.install(checked.candidate.id, randomUUID(), 'prerelease'); await started;
-  await assert.rejects(updates.install(checked.candidate.id, randomUUID(), 'prerelease'), { code: 'UPDATE_BUSY' });
+  const checked = await updates.check('prerelease'), first = updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey); await started;
+  await assert.rejects(updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey), { code: 'UPDATE_BUSY' });
   releaseInstall({ application: 'failed', stage: 'install' }); await first;
   const ahead = await fixture(t, { bundle: { version: '0.1.0-alpha.9' } });
-  assert.equal((await ahead.updates.check('prerelease')).status, 'restart-required');
-  await ahead.updates.install(`${1}:v${NEXT}`, randomUUID(), 'prerelease'); assert.equal(ahead.calls.length, 0);
+  assert.equal((await ahead.updates.check('prerelease', updates.profileKey)).status, 'restart-required');
+  await ahead.updates.install(`${1}:v${NEXT}`, randomUUID(), 'prerelease', ahead.updates.profileKey); assert.equal(ahead.calls.length, 0);
 });
 test('Failure before manager admission can be checked and retried with a new ID', async t => {
   let busy = false;
   const { updates, calls } = await fixture(t, { busy: () => busy });
   let checked = await updates.check('prerelease'); busy = true;
-  assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease')).status, 'failed'); assert.equal(calls.length, 0);
+  assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey)).status, 'failed'); assert.equal(calls.length, 0);
   busy = false; checked = await updates.check('prerelease');
-  assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease')).status, 'restart-required'); assert.equal(calls.length, 1);
+  assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey)).status, 'restart-required'); assert.equal(calls.length, 1);
 });
 test('Disposal or newly installed version during final await prevents manager invocation', async t => {
   for (const disposed of [true, false]) {
     let count = 0, releaseLookup, announce;
     const final = new Promise(resolve => { announce = resolve; });
     const { updates, calls, bundle } = await fixture(t, { manager: { listBundles: async () => { count++; if (count === 3) { announce(); await new Promise(resolve => { releaseLookup = resolve; }); } return [bundle]; } } });
-    const checked = await updates.check('prerelease'), pending = updates.install(checked.candidate.id, randomUUID(), 'prerelease'); await final;
+    const checked = await updates.check('prerelease'), pending = updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey); await final;
     if (disposed) updates.dispose(); else bundle.version = '0.1.0-alpha.9';
     releaseLookup(); await pending; assert.equal(calls.length, 0);
   }
@@ -159,9 +159,37 @@ test('Late reconciliation of an old request cannot corrupt a newer in-progress r
   const observing = updates.status(oldId); while (!settleOld) await new Promise(resolve => setImmediate(resolve));
   const writer = new Updates({ manager: updates.manager, profileDir: dir, runtime: RUNTIME });
   writer.operation = { id: oldId, version: NEXT, channel: 'prerelease', phase: 'failed', result: { application: 'failed', stage: 'install' } }; await writer.save();
-  const checked = await updates.check('prerelease'), installing = updates.install(checked.candidate.id, nextId, 'prerelease'); await begun;
+  const checked = await updates.check('prerelease'), installing = updates.install(checked.candidate.id, nextId, 'prerelease', updates.profileKey); await begun;
   settleOld({ application: 'failed', stage: 'install' }); await observing;
   assert.equal(updates.operation.id, nextId); assert.equal(updates.operation.result, undefined);
   assert.equal(JSON.parse(await readFile(join(dir, '.dsh-cf-updates', `${nextId}.json`), 'utf8')).result, undefined);
   settleNew({ application: 'failed', stage: 'install' }); await installing;
+});
+test('Authoritative latest Host operation replaces a stale cached receipt', async () => {
+  const stale = randomUUID(), active = randomUUID(), storage = new Map([[`dsh.cf.update.${PROFILE_KEY}.operation`, stale]]);
+  const { Controller } = await clientController(storage), requests = [];
+  const client = new Controller({ rpc: { call: async (_base, method, payload) => { requests.push(payload); return { ok: true, value: { status: 'installing', profileKey: PROFILE_KEY, running: VERSION, channel: 'prerelease', operation: active } }; } } });
+  await client.status(); await client.status();
+  assert.equal(requests.length, 2); assert(requests.every(payload => !payload.operationId)); assert.equal(client.operation, active); assert.equal(storage.get(`dsh.cf.update.${PROFILE_KEY}.operation`), active); client.dispose();
+});
+test('An install bound to a different profile is rejected before any manager action', async t => {
+  const { updates, calls } = await fixture(t), checked = await updates.check('prerelease');
+  await assert.rejects(updates.install(checked.candidate.id, randomUUID(), 'prerelease', 'b'.repeat(64)), { code: 'UPDATE_PROFILE' });
+  assert.equal(calls.length, 0); assert.equal(updates.operation, null);
+});
+test('Nominal success requires a valid writable installed bundle inventory', async t => {
+  for (const invalid of [{ installed: false }, { error: { code: 'INVALID_BUNDLE' } }, { readOnlyReason: 'locked' }]) {
+    const { updates, bundle, manager } = await fixture(t);
+    manager.installBundle = async () => { Object.assign(bundle, invalid, { version: NEXT }); return { application: 'restart-required', stage: 'install', bundle: 'dsh-cf', version: NEXT }; };
+    const checked = await updates.check('prerelease');
+    assert.equal((await updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey)).status, 'unknown');
+  }
+});
+test('Reload after the first install reply is lost reconciles its scoped ID without resending', async () => {
+  const storage = new Map(), { Controller } = await clientController(storage), requests = [];
+  const available = { status: 'available', profileKey: PROFILE_KEY, running: VERSION, channel: 'prerelease', candidate: { id: 'candidate', version: NEXT, notes: '', url: `https://github.com/${REPO}/releases/tag/v${NEXT}` } };
+  const first = new Controller({ rpc: { call: async (_base, method, payload) => { requests.push({ method, payload }); if (method === 'update-install') throw Error('lost'); return { ok: true, value: available }; } } });
+  await first.status(); await first.install(); const id = first.operation; first.dispose();
+  const next = new Controller({ rpc: { call: async (_base, method, payload) => { requests.push({ method, payload }); return { ok: true, value: { status: payload.operationId ? 'unknown' : 'idle', operation: payload.operationId, profileKey: PROFILE_KEY, running: VERSION, channel: 'prerelease' } }; } } });
+  await next.status(); assert.equal(next.operation, id); assert.equal(next.view.status, 'unknown'); assert.equal(requests.at(-1).payload.operationId, id); assert.equal(requests.filter(item => item.method === 'update-install').length, 1); next.dispose();
 });

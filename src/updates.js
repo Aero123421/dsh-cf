@@ -122,15 +122,15 @@ export class Updates {
       return true;
     } catch (error) { if (error.code !== 'ENOENT') throw error; return false; }
   }
-  result(result, installed, operation = this.operation) {
+  result(result, bundle, operation = this.operation) {
     let status = result.application;
     if (['applied', 'restart-required'].includes(status) && (result.error || result.packageResult?.exitCode !== undefined && (result.packageResult.exitCode !== 0 || result.packageResult.timedOut))) status = 'failed';
     else if (['applied', 'restart-required'].includes(status)) {
-      status = result.bundle === 'dsh-cf' && result.version === operation.version && installed === operation.version ? this.version === operation.version ? 'confirmed' : 'restart-required' : 'unknown';
+      status = result.bundle === 'dsh-cf' && result.version === operation.version && bundle?.installed === true && !bundle.error && !bundle.readOnlyReason && bundle.version === operation.version ? this.version === operation.version ? 'confirmed' : 'restart-required' : 'unknown';
     }
     if (!PHASES.includes(status)) status = 'unknown';
     operation.phase = status;
-    const view = { status, running: this.version, dshVersion: this.runtime, channel: operation.channel, operation: operation.id, installed, releases: RELEASES, profileKey: this.profileKey, ...(result.error ? { reason: result.error.code } : {}), stage: result.stage };
+    const view = { status, running: this.version, dshVersion: this.runtime, channel: operation.channel, operation: operation.id, installed: bundle?.version, releases: RELEASES, profileKey: this.profileKey, ...(result.error ? { reason: result.error.code } : {}), stage: result.stage };
     if (this.operation?.id === operation.id && (!this.activeId || this.activeId === operation.id)) this.view = view;
     return view;
   }
@@ -147,7 +147,7 @@ export class Updates {
       const result = operation.result ?? await manager.waitForInstall(operation.id);
       if (!result) { operation.phase = 'unknown'; const view = { ...this.view, status: 'unknown', operation: operation.id }; if (this.operation?.id === operation.id && !this.activeId) this.view = view; return view; }
       operation.result = safeResult(result); await this.save(false, operation);
-      const installed = (await manager.listBundles()).find(item => item.name === 'dsh-cf')?.version;
+      const installed = (await manager.listBundles()).find(item => item.name === 'dsh-cf');
       const view = this.result(result, installed, operation); await this.save(false, operation); return view;
     } catch (error) { return this.fail(error, 'unavailable'); }
   }
@@ -168,7 +168,8 @@ export class Updates {
     })().finally(() => { this.pending = null; });
     return this.pending;
   }
-  install(candidateId, operationId, channel) {
+  install(candidateId, operationId, channel, expectedProfileKey) {
+    if (!this.profileKey || expectedProfileKey !== this.profileKey) return Promise.reject(new CfError('UPDATE_PROFILE', '接続先が変わりました。更新を再確認してください。'));
     if (this.pending) return this.pendingId === operationId && typeof operationId === 'string' ? this.pending : Promise.reject(new CfError('UPDATE_BUSY', '別の更新操作が進行中です。'));
     this.pendingId = operationId;
     this.pending = (async () => {
@@ -190,7 +191,7 @@ export class Updates {
         started = true;
         const result = await manager.installBundle(`github:${REPOSITORY}#${candidate.tag}`, { enabled: latest.bundle.enabled, requestId: operationId });
         this.operation.result = safeResult(result); await this.save(); const after = (await manager.listBundles()).find(item => item.name === 'dsh-cf');
-        const view = this.result(result, after?.version); await this.save(); return view;
+        const view = this.result(result, after); await this.save(); return view;
       } catch (error) {
         if (admitted && this.operation?.id === operationId && !this.operation.result && !started) { this.operation.result = { application: 'failed', stage: 'install', error: { code: error instanceof CfError ? error.code : 'UPDATE_FAILURE' } }; this.operation.phase = 'failed'; await this.save().catch(() => {}); }
         const unresolved = this.operation && (!this.operation.result || ['unknown', 'installing'].includes(this.operation.phase));

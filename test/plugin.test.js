@@ -95,8 +95,8 @@ test('actual updater RPC preserves disabled state and busy responses while cloud
   const f = await dshHost(t, { manager }), before = JSON.parse((await f.call('status')).body).result.value;
   const check = JSON.parse((await f.call('update-check', { payload: { channel: 'prerelease' } })).body).result.value;
   const id = (await import('node:crypto')).randomUUID();
-  const first = f.call('update-install', { payload: { candidateId: check.candidate.id, operationId: id, channel: 'prerelease' } }); await started;
-  const busy = JSON.parse((await f.call('update-install', { payload: { candidateId: check.candidate.id, operationId: (await import('node:crypto')).randomUUID(), channel: 'prerelease' } })).body).result;
+  const first = f.call('update-install', { payload: { profileKey: check.profileKey, candidateId: check.candidate.id, operationId: id, channel: 'prerelease' } }); await started;
+  const busy = JSON.parse((await f.call('update-install', { payload: { profileKey: check.profileKey, candidateId: check.candidate.id, operationId: (await import('node:crypto')).randomUUID(), channel: 'prerelease' } })).body).result;
   assert.equal(busy.ok, false); assert.equal(busy.error.code, 'UPDATE_BUSY');
   bundle.version = version; complete({ application: 'restart-required', stage: 'install', bundle: 'dsh-cf', version });
   assert.equal(JSON.parse((await first).body).result.value.status, 'restart-required');
