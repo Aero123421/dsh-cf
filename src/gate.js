@@ -10,6 +10,14 @@ export const DIAGNOSTIC_PATH = VERIFY_PATH;
 function denied(res, status, message, instanceId) {
   res.setHeader('x-dsh-cf-gate', instanceId); json(res, status, { error: message });
 }
+function rejectSocket(socket, status) {
+  // A rejected upgrade has no HTTP server timeout and the peer may never send FIN.
+  // Flush the small response, then close both halves; bound even a stalled flush.
+  const timer = setTimeout(() => socket.destroy(), 1000); timer.unref();
+  socket.once('close', () => clearTimeout(timer));
+  socket.once('error', () => socket.destroy());
+  socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy());
+}
 function pathOf(req) {
   demand(typeof req.url === 'string' && req.url.startsWith('/') && !req.url.startsWith('//') && !/[\\\x00-\x20]/.test(req.url), 'PATH', 'Invalid request target.');
   const url = new URL(req.url, 'https://local.invalid');
@@ -61,7 +69,7 @@ export class Gate {
     this.server = createServer({ maxHeaderSize: 32 * 1024 }, (req, res) => { void this.http(req, res); });
     this.server.on('connection', socket => { this.sockets.add(socket); socket.on('close', () => this.sockets.delete(socket)); });
     this.server.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head); });
-    this.server.on('clientError', (_error, socket) => socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'));
+    this.server.on('clientError', (_error, socket) => rejectSocket(socket, '400 Bad Request'));
     // Request headers must arrive promptly; a slow upload body is bounded by the per-stream lifetime instead
     // of Node's whole-request timeout, which would cut legitimate large uploads on slow links.
     this.server.headersTimeout = 15_000; this.server.requestTimeout = this.maximumStreamMs; this.server.maxRequestsPerSocket = 1000;
@@ -146,13 +154,13 @@ export class Gate {
     socket.once('end', () => socket.destroy()); // An upgraded HTTP socket may otherwise stay half-open.
     // Share HTTP's budget and reserve before authentication/session exchange can yield.
     const admitted = this.reserve(socket);
-    if (!admitted) { socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'); return; }
+    if (!admitted) { rejectSocket(socket, '503 Service Unavailable'); return; }
     let identity, url;
     try {
       demand(String(req.headers.upgrade).toLowerCase() === 'websocket', 'UPGRADE', 'Unsupported upgrade.');
       ({ identity, url } = await this.authenticate(req, true));
       demand(this.enabled, 'PROOF', 'Verification required.');
-    } catch { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); admitted(); return; }
+    } catch { rejectSocket(socket, '401 Unauthorized'); admitted(); return; }
     try {
       if (socket.destroyed || this.closing) return;
       const [target, cookie] = await Promise.all([this.adapter.target(this.host), this.adapter.cookie(this.host)]);

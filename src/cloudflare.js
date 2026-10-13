@@ -8,6 +8,7 @@ const exact = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export class Cloudflare {
   constructor(token, fetchImpl = fetch) { demand(typeof token === 'string' && token.length >= 20 && !/\s/.test(token), 'API_TOKEN', 'Enter an API token, not a Global API key.'); this.token = token; this.fetch = fetchImpl; }
   async call(method, path, body, signal) {
+    signal?.throwIfAborted();
     demand(path.startsWith('/') && !path.startsWith('//'), 'API_PATH', 'Invalid Cloudflare API path.');
     let response;
     try { response = await this.fetch(API + path, { method, redirect: 'error', signal: timeout(signal), headers: { Authorization: `Bearer ${this.token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
@@ -21,6 +22,7 @@ export class Cloudflare {
           : 'Cloudflare did not respond, so the change may or may not have been applied. Check connectivity and retry.');
     }
     const data = await boundedJson(response);
+    signal?.throwIfAborted();
     demand(response.ok && data.success === true, `CF_${response.status}`, `Cloudflare API returned HTTP ${response.status}. Check the selected resources and token permissions.`);
     return data;
   }
@@ -138,13 +140,11 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
   const tunnel = await cf.get(tunnelPath, signal);
   demand(tunnel.name === marker && !tunnel.deleted_at, 'TUNNEL_CHANGED', 'The stored Tunnel ID no longer belongs to this instance.');
   const desired = { config: { ingress: [ { hostname: setup.hostname, service: `http://127.0.0.1:${gatePort}`, originRequest: { access: { required: true, teamName: setup.teamDomain.replace('.cloudflareaccess.com', ''), audTag: [owned.audience] } } }, { service: 'http_status:404' } ] } };
-  if (owned.ingressConfigured) {
-    const existing = await cf.get(`${tunnelPath}/configurations`, signal);
-    const rules = existing.config?.ingress;
-    demand(rules?.length === 2 && rules[0].hostname === setup.hostname && rules[0].service === desired.config.ingress[0].service && rules[0].originRequest?.access?.required === true && exact(rules[0].originRequest.access.audTag, [owned.audience]) && rules[1].service === 'http_status:404', 'TUNNEL_CHANGED', 'The owned Tunnel routing changed. It was not overwritten.');
-  } else {
-    await cf.call('PUT', `${tunnelPath}/configurations`, desired, signal); owned.ingressConfigured = true; await store.save();
-  }
+  if (!owned.ingressConfigured) await cf.call('PUT', `${tunnelPath}/configurations`, desired, signal);
+  const existing = await cf.get(`${tunnelPath}/configurations`, signal);
+  const rules = existing?.config?.ingress;
+  demand(rules?.length === 2 && rules[0]?.hostname === setup.hostname && rules[0].service === desired.config.ingress[0].service && rules[0].originRequest?.access?.required === true && rules[0].originRequest.access.teamName === desired.config.ingress[0].originRequest.access.teamName && exact(rules[0].originRequest.access.audTag, [owned.audience]) && rules[1]?.service === 'http_status:404', 'TUNNEL_CHANGED', 'The owned Tunnel routing does not match the expected configuration. Publication was stopped.');
+  if (!owned.ingressConfigured) { owned.ingressConfigured = true; await store.save(); }
   if (!(await store.hasToken())) {
     const token = await cf.get(`${tunnelPath}/token`, signal); await store.writeToken(typeof token === 'string' ? token : token.token);
   }
@@ -153,10 +153,10 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
     await writeNew('dns', `/zones/${id(setup.zoneId)}/dns_records`, { type: 'CNAME', name: setup.hostname, content: `${owned.tunnelId}.cfargotunnel.com`, proxied: true, ttl: 1, comment: marker }, async record => {
       demand(typeof record?.id === 'string', 'CF_CREATE', 'Cloudflare returned no DNS record ID.'); owned.dnsId = record.id;
     });
-  } else {
-    const record = await cf.get(`/zones/${id(setup.zoneId)}/dns_records/${id(owned.dnsId)}`, signal);
-    demand(record.name === setup.hostname && record.type === 'CNAME' && record.content === `${owned.tunnelId}.cfargotunnel.com` && record.proxied === true, 'DNS_CHANGED', 'The owned DNS record changed. It was not overwritten.');
   }
+  // Keep the returned ID durable even if this read fails, so retry/cleanup never creates a duplicate.
+  const record = await cf.get(`/zones/${id(setup.zoneId)}/dns_records/${id(owned.dnsId)}`, signal);
+  demand(record?.name === setup.hostname && record.type === 'CNAME' && record.content === `${owned.tunnelId}.cfargotunnel.com` && record.proxied === true, 'DNS_CHANGED', 'The owned DNS record does not match the expected configuration. Publication was stopped.');
   return { ...setup, audience: owned.audience };
 }
 export async function removeOwned(cf, store, signal) {

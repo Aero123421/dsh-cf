@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { connect } from 'node:net';
 import { once } from 'node:events';
 import { Gate, browserFence, DIAGNOSTIC_PATH } from '../src/gate.js';
 import { DshAdapter } from '../src/dsh.js';
@@ -26,6 +27,25 @@ function websocket(port) {
     req.end();
   });
 }
+async function halfOpenUpgrade(t, port, upgrade = 'websocket') {
+  const socket = connect({ host: '127.0.0.1', port, allowHalfOpen: true });
+  t.after(() => socket.destroy());
+  const chunks = []; socket.on('data', chunk => chunks.push(chunk));
+  socket.on('error', () => {});
+  await once(socket, 'connect');
+  const ended = once(socket, 'end');
+  socket.write(`GET /api/stream HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: https://${HOST}\r\nConnection: Upgrade\r\nUpgrade: ${upgrade}\r\n\r\n`);
+  await ended;
+  assert.equal(socket.writable, true, 'peer deliberately leaves its write side open');
+  return Buffer.concat(chunks).toString();
+}
+for (const upgrade of ['websocket', 'unsupported']) test(`rejected ${upgrade} closes the server socket without waiting for peer FIN`, async t => {
+  const f = await fixture(t);
+  assert.match(await halfOpenUpgrade(t, f.gate.port, upgrade), /^HTTP\/1.1 401 /);
+  await until(() => f.gate.requests === 0 && f.gate.sockets.size === 0);
+  assert.equal(f.upstream.exchanges, 0);
+  assert.equal((await f.activate()).status, 200);
+});
 for (const [name, patch] of [
   ['wrong Host', { headers: { ...headers, host: 'evil.example.com' } }],
   ['wrong Origin', { headers: { ...headers, origin: 'https://evil.example.com' } }],
@@ -134,6 +154,9 @@ test('WebSockets share the HTTP budget and failed authentication releases reserv
   const requests = Array.from({ length: 64 }, () => http(f.gate.port, { headers }));
   await until(() => verifying === 64);
   assert.equal((await websocket(f.gate.port)).status, 503); assert.equal(verifying, 64);
+  assert.match(await halfOpenUpgrade(t, f.gate.port), /^HTTP\/1.1 503 /);
+  await until(() => f.gate.sockets.size === 64);
+  assert.equal(f.gate.requests, 64, 'capacity rejection does not consume or release another request’s slot');
   release(); assert((await Promise.all(requests)).every(r => r.status === 401));
   await until(() => f.gate.requests === 0);
   assert.equal((await websocket(f.gate.port)).status, 401);

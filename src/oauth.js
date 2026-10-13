@@ -12,7 +12,7 @@ export class OAuth {
   constructor({ fetchImpl = fetch, onToken = () => {}, onState = () => {} } = {}) {
     this.fetch = fetchImpl; this.onToken = onToken; this.onState = onState; this.pending = null; this.server = null; this.grantClientId = null; this.generation = 0;
   }
-  async begin({ clientId, scopes, port = 8789 }) {
+  async begin({ clientId, scopes, port = 8789, authorizationId }) {
     demand(typeof clientId === 'string' && /^[A-Za-z0-9_-]{8,200}$/.test(clientId), 'OAUTH_CLIENT', 'Register a public Cloudflare OAuth client or configure your own Client ID first.');
     demand(Array.isArray(scopes) && scopes.length > 0 && scopes.every(s => typeof s === 'string' && /^[A-Za-z0-9._-]{1,180}$/.test(s)), 'OAUTH_SCOPES', 'Enter the exact scope IDs registered for this OAuth client.');
     demand(!scopes.some(s => s === 'offline_access' || s === 'offline'), 'OAUTH_SCOPES', 'Persistent refresh grants are not requested by this plugin.');
@@ -30,7 +30,7 @@ export class OAuth {
       void this.finish(incoming.href).then(() => reply(200, 'Cloudflare connected. Return to DeepSeek Harness.')).catch(() => reply(400, 'Authorization was not completed. Return to DSH and retry.'));
     });
     this.server = server;
-    const pending = { state, verifier, clientId, redirectUri, expires: Date.now() + 5 * 60_000, timer: null, used: false, abort: new AbortController(), server };
+    const pending = { state, verifier, clientId, authorizationId, redirectUri, expires: Date.now() + 5 * 60_000, timer: null, used: false, abort: new AbortController(), server };
     this.pending = pending; // Own the listener before listen() can yield to cancellation.
     try {
       await new Promise((resolve, reject) => {
@@ -76,7 +76,7 @@ export class OAuth {
       // Ignore unsolicited refresh/id tokens. Only the expiring API grant is retained.
       pending.abort.signal.throwIfAborted();
       demand(this.pending === pending, 'OAUTH_EXPIRED', 'The authorization attempt was superseded.');
-      await this.onToken(body.access_token, Date.now() + body.expires_in * 1000, pending.abort.signal);
+      await this.onToken(body.access_token, Date.now() + body.expires_in * 1000, pending.abort.signal, pending.authorizationId);
       pending.abort.signal.throwIfAborted();
       // A public client identifies itself at the revocation endpoint (RFC 7009 §2.1).
       this.grantClientId = pending.clientId;
@@ -88,11 +88,10 @@ export class OAuth {
       pending.server.close();
     }
   }
-  async revoke(token) {
+  async revoke(token, signal, clientId = this.grantClientId) {
     if (!token) return;
-    const clientId = this.grantClientId;
     demand(typeof clientId === 'string' && clientId.length > 0, 'OAUTH_REVOKE', 'The OAuth client for this grant is unknown. The local grant can still be forgotten.');
-    const response = await this.fetch(REVOKE, { method: 'POST', redirect: 'error', signal: timeout(undefined), headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token, token_type_hint: 'access_token', client_id: clientId }) });
+    const response = await this.fetch(REVOKE, { method: 'POST', redirect: 'error', signal: timeout(signal), headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token, token_type_hint: 'access_token', client_id: clientId }) });
     demand(response.ok, 'OAUTH_REVOKE', 'Cloudflare did not confirm grant revocation. The local grant can still be forgotten.');
   }
   async cancel() {

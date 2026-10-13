@@ -44,7 +44,9 @@ The `/dsh-cf/<action>` channel is registered on DSH's WebServer route table and 
 
 ## Live validation status
 
-Validated on real DSH `0.2.1-alpha.2` (npm, Linux, web profile), with Cloudflare's edge emulated by a local TLS proxy and Access JWTs signed by a local RSA key: plugin install and load, settings UI and channel admission, `trustedHosts` persistence through configEditor and the resulting Connection reload, launch-token cookie exchange, HTTP/API/WebSocket proxying, rejection of missing/wrong-owner/expired JWTs and of public management, launch tokens and cross-origin requests, automatic UI reconnection after forced stream closure, boot-time auto-connect launching the real cloudflared 2026.10.0 with its exact flags, connector and guardian cleanup after `kill -9` of DSH, stale-lock recovery, and the host-identity review. The real JOSE RSA/JWT tests run in `npm run check`.
+Plugin version `0.1.0-alpha.2` was validated on real DSH `0.2.1-alpha.2` (npm, Linux, web profile), with Cloudflare's edge emulated by a local TLS proxy and Access JWTs signed by a local RSA key: plugin install and load, settings UI and channel admission, `trustedHosts` persistence through configEditor and the resulting Connection reload, launch-token cookie exchange, HTTP/API/WebSocket proxying, rejection of missing/wrong-owner/expired JWTs and of public management, launch tokens and cross-origin requests, automatic UI reconnection after forced stream closure, boot-time auto-connect launching the real cloudflared 2026.10.0 with its exact flags, connector and guardian cleanup after `kill -9` of DSH, stale-lock recovery, and the host-identity review. The real JOSE RSA/JWT tests run in `npm run check`.
+
+Version `0.1.0-alpha.3` adds local regression coverage for overlapping shutdown, authorization replacement, management-operation cancellation, rejected WebSocket cleanup, per-connection Tunnel status, and configuration readback. These local fixtures do not establish live Cloudflare compatibility; the release remains a developer preview.
 
 Still required before release:
 

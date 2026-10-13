@@ -30,6 +30,7 @@ process.on('message', async message => {
     if (stopping) { await rm(directory, { recursive: true, force: true }); return; }
     child = spawn(message.binary, connectorArgs(config, message.tokenFile), { shell: false, windowsHide: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
     report('starting'); let buffer = '';
+    const registered = new Set();
     const parse = chunk => {
       buffer = (buffer + chunk.toString()).slice(-32_768);
       for (;;) {
@@ -37,9 +38,15 @@ process.on('message', async message => {
         const line = buffer.slice(0, n); buffer = buffer.slice(n + 1);
         let event; try { event = JSON.parse(line); } catch { continue; }
         // Only a bounded status enum crosses IPC. Raw cloudflared logs can contain credentials.
+        // cloudflared's HA connections log their numeric connIndex independently. A retry
+        // for one connection does not take the tunnel down while another is registered.
+        const index = event?.connIndex;
+        if (!Number.isSafeInteger(index) || index < 0) continue;
         const text = String(event.message || '');
-        if (text.includes('Registered tunnel connection')) report('connected');
-        else if (text.includes('Unregistered tunnel connection') || text.includes('Retrying connection')) report('disconnected');
+        if (text.includes('Registered tunnel connection')) registered.add(index);
+        else if (text.includes('Unregistered tunnel connection') || text.includes('Retrying connection')) registered.delete(index);
+        else continue;
+        report(registered.size ? 'connected' : 'disconnected');
       }
     };
     child.stdout.on('data', parse); child.stderr.on('data', parse);

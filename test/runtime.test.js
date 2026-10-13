@@ -160,7 +160,7 @@ test('managed cache checksum is verified again before execution', { skip: proces
 test('guardian starts a real fixture child with the exact argv and stops only that child', unix, async t => {
   const dir = await directory(t), binary = join(dir, 'cloudflared'), pidFile = join(dir, 'pid'), argvFile = join(dir, 'argv');
   // The fixture behaves like cloudflared's flag parser: an unknown flag is a usage error and exit, as the real binary does.
-  await writeFile(binary, `#!/usr/bin/env node\nconst fs=require('fs');const a=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(argvFile)},JSON.stringify(a));\nif(a.includes('--logformat')){console.error('Incorrect Usage. flag provided but not defined: -logformat');process.exit(0);}\nfs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));\nconsole.error(JSON.stringify({level:'info',message:'Registered tunnel connection'}));\nsetInterval(()=>{},1000);\n`, { mode: 0o700 });
+  await writeFile(binary, `#!/usr/bin/env node\nconst fs=require('fs');const a=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(argvFile)},JSON.stringify(a));\nif(a.includes('--logformat')){console.error('Incorrect Usage. flag provided but not defined: -logformat');process.exit(0);}\nfs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));\nconsole.error(JSON.stringify({level:'info',message:'Registered tunnel connection',connIndex:0}));\nsetInterval(()=>{},1000);\n`, { mode: 0o700 });
   const statuses = []; const connector = new Connector(s => statuses.push(s)); t.after(() => connector.stop());
   const tokenFile = join(dir, 'tunnel.token');
   await connector.start(binary, tokenFile);
@@ -171,9 +171,64 @@ test('guardian starts a real fixture child with the exact argv and stops only th
   const pid = Number(await readFile(pidFile));
   await connector.stop(); assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }); assert.equal(statuses.at(-1), 'stopped'); assert(!statuses.includes('error'));
 });
+for (const scenario of [
+  {
+    name: 'partial HA connection failures keep the tunnel connected',
+    events: [
+      { message: 'Registered tunnel connection', connIndex: 0 },
+      { message: 'Registered tunnel connection', connIndex: 1 },
+      { message: 'Retrying connection in up to 1s', connIndex: 2 },
+      { message: 'Unregistered tunnel connection', connIndex: 0 },
+      { message: 'Retrying connection in up to 1s', connIndex: 0 },
+    ],
+    expected: ['connected', 'connected', 'connected', 'connected', 'connected'],
+  },
+  {
+    name: 'all HA connections must disconnect before reporting disconnected, and registration recovers',
+    events: [
+      { message: 'Registered tunnel connection', connIndex: 0 },
+      { message: 'Registered tunnel connection', connIndex: 0 },
+      { message: 'Registered tunnel connection', connIndex: 1 },
+      { message: 'Unregistered tunnel connection', connIndex: 0 },
+      { message: 'Unregistered tunnel connection', connIndex: 1 },
+      { message: 'Retrying connection in up to 1s', connIndex: 1 },
+      { message: 'Registered tunnel connection', connIndex: 1 },
+    ],
+    expected: ['connected', 'connected', 'connected', 'connected', 'disconnected', 'disconnected', 'connected'],
+  },
+  {
+    name: 'missing or malformed connection indexes cannot change observed connectivity',
+    events: [
+      null,
+      { message: 'Registered tunnel connection' },
+      { message: 'Registered tunnel connection', connIndex: '0' },
+      { message: 'Registered tunnel connection', connIndex: -1 },
+      { message: 'Registered tunnel connection', connIndex: 0.5 },
+      { message: 'Registered tunnel connection', connIndex: 0, token: 'fixture-secret-never-forward' },
+      { message: 'Unregistered tunnel connection' },
+      { message: 'Retrying connection in up to 1s', connIndex: '0' },
+      { message: 'Unregistered tunnel connection', connIndex: 0 },
+    ],
+    expected: ['connected', 'disconnected'],
+  },
+]) test(`guardian: ${scenario.name}`, unix, async t => {
+  const dir = await directory(t), binary = join(dir, 'ha-cloudflared');
+  await writeFile(binary, `#!/usr/bin/env node\nfor(const event of ${JSON.stringify(scenario.events)}) console.error(JSON.stringify(event));\nsetTimeout(()=>process.exit(0),100);\n`, { mode: 0o700 });
+  const statuses = [], messages = [], connector = new Connector(s => statuses.push(s)); t.after(() => connector.stop());
+  await connector.start(binary, join(dir, 'tunnel.token'));
+  connector.process.on('message', message => messages.push(message));
+  // Wait for process exit so every preceding log/IPC event has been observed, including
+  // invalid events that must not manufacture a connected or disconnected status.
+  for (let i = 0; connector.process && i < 300; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(connector.process, null);
+  assert(statuses.includes('error'), 'the fixture has exited');
+  assert.deepEqual(statuses.slice(0, statuses.indexOf('error')), ['starting', ...scenario.expected]);
+  assert(messages.every(message => Object.keys(message).sort().join(',') === 'status,type' && message.type === 'status'));
+  assert(!JSON.stringify(messages).includes('fixture-secret-never-forward'));
+});
 for (const code of [0, 1]) test(`unexpected connector exit ${code} remains an error through guardian cleanup`, unix, async t => {
   const dir = await directory(t), binary = join(dir, 'exiting-cloudflared');
-  await writeFile(binary, `#!/usr/bin/env node\nconsole.error(JSON.stringify({message:'Registered tunnel connection'}));setTimeout(()=>process.exit(${code}),50);\n`, { mode: 0o700 });
+  await writeFile(binary, `#!/usr/bin/env node\nconsole.error(JSON.stringify({message:'Registered tunnel connection',connIndex:0}));setTimeout(()=>process.exit(${code}),50);\n`, { mode: 0o700 });
   const statuses = [], connector = new Connector(s => statuses.push(s)); t.after(() => connector.stop());
   await connector.start(binary, join(dir, 'tunnel.token'));
   for (let i = 0; connector.process && i < 200; i++) await new Promise(r => setTimeout(r, 10));

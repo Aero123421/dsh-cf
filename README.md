@@ -4,14 +4,14 @@
 
 DSHの設定画面から、専用のCloudflare Tunnel・DNS・Accessアプリを作成するプラグインです。既存の`cloudflared`を再利用し、所有者のAccessログイン＋WebAuthn追加認証を通してDSHを開きます。Workerのデプロイ、ポート開放、常設の管理サーバーは不要です。
 
-> **0.1.0-alpha.2 / developer preview.** 実DSH（`0.2.1-alpha.2`、Linux）へのインストールと、DSH側の連携（設定画面・設定用通信・`trustedHosts`編集・セッション交換・HTTP/API/WebSocket中継・自動再接続・異常終了時の停止）は実機で確認済みです。**実CloudflareアカウントでのOAuth・API作成・Accessログイン/WebAuthn・Tunnel登録と、macOS/Windows/iPadOSの実機試験はまだです。** セキュリティ監査済み・本番運用可能とは扱わないでください。パスキー単独ログインではありません。確認内容の詳細は「検証」を参照してください。
+> **0.1.0-alpha.3 / developer preview.** 停止・認証・接続管理と設定の読み戻しを修正したプレビュー版です。旧版`0.1.0-alpha.2`では、実DSH（`0.2.1-alpha.2`、Linux）へのインストールと、DSH側の連携（設定画面・設定用通信・`trustedHosts`編集・セッション交換・HTTP/API/WebSocket中継・自動再接続・異常終了時の停止）を実機で確認しています。**実CloudflareアカウントでのOAuth・API作成・Accessログイン/WebAuthn・Tunnel登録と、macOS/Windows/iPadOSの実機試験はまだです。** セキュリティ監査済み・本番運用可能とは扱わないでください。パスキー単独ログインではありません。確認内容の詳細は「検証」を参照してください。
 
 ## 導入
 
 Node.js **22.12以上**。DSH `0.2.1-alpha.2`（upstream `d743267388641bc76f17c45ce8b4c231aed1d32c`）の公開APIを基準にしています。DSHは開発プレビューのため、互換性は固定版で検証してください。
 
 ```sh
-dsh plugin --profile web add -w github:Aero123421/dsh-cf
+dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.3'
 # DSHを再起動して Settings → Cloudflare を開く
 dsh web
 ```
@@ -166,6 +166,12 @@ DSH_CF_OFFLINE_TEST=1 npm run check
 `npm ci && npm run check`で**93件中92件成功、1件は上記の任意テスト**（cloudflared 2026.10.0公式バイナリを指定して実行し成功）。JOSEの実RSA署名検証を含みます。HTTP/WSの実loopbackソケット、DSH契約を模した上流、設定用通信の形式と認証、偽装ヘッダー拒否、Cookie非流出、POST非再送、OAuth state/PKCE/キャンセル/取り消し、API競合と不明なPOST、ページング、Tunnel削除前の接続消去、専用子プロセス停止、ファイル権限/ロック/ホスト確認をテストしています。Cloudflare APIはテスト用応答です。
 
 追加の回帰検証（Linux x64、Node **24.19.0**）では、同じチェックで**115件中114件成功、任意の実cloudflaredテスト1件スキップ**。OAuth開始途中の停止、別PID名前空間のheartbeatと所有権喪失、HTTP/WS共通の64接続上限、IPv4/IPv6/localhostのセッション交換と中継、コネクタ異常終了・一時切断からの復帰を確認しています。実Cloudflare連携の検証結果が増えたという意味ではありません。
+
+### 修正版の回帰検証（0.1.0-alpha.3）
+
+Linux x64・Node **24.19.0**で`npm ci && npm run check`を実行し、**138件中137件成功、失敗0、任意の実cloudflaredテスト1件スキップ**。停止・破棄・再開の競合、OAuth/API認証の切り替え、管理リクエストのキャンセル、拒否したWebSocketの後片付け、複数Tunnel接続の状態集計、Accessチーム名と初回Tunnel/DNS設定の読み戻しを回帰テストに追加しました。読み戻しに失敗した設定は再開できず、再認可して設定の検証を完了する必要があります。設定画面の通信回復時に古い再接続警告が消えるよう修正しています。
+
+Cloudflareの応答とconnectorの複数接続ログにはローカルfixtureを使っています。下記の実DSH検証は旧版の記録であり、この修正版について実Cloudflare・実WebAuthnの検証を追加したものではありません。
 
 ### 実DSHでの確認（0.1.0-alpha.2）
 
