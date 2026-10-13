@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { childEnv } from './connector.js';
+import { childEnv, connectorArgs } from './connector.js';
 
 let child, directory, stopping = false, started = false;
 const report = status => { if (process.connected) process.send?.({ type: 'status', status }); };
@@ -28,7 +28,7 @@ process.on('message', async message => {
     directory = await mkdtemp(join(tmpdir(), 'dsh-cf-'));
     const config = join(directory, 'config.yml'); await writeFile(config, '{}\n', { mode: 0o600 });
     if (stopping) { await rm(directory, { recursive: true, force: true }); return; }
-    child = spawn(message.binary, ['--no-autoupdate', 'tunnel', '--config', config, '--metrics', '127.0.0.1:0', '--logformat', 'json', 'run', '--token-file', message.tokenFile], { shell: false, windowsHide: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(message.binary, connectorArgs(config, message.tokenFile), { shell: false, windowsHide: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
     report('starting'); let buffer = '';
     const parse = chunk => {
       buffer = (buffer + chunk.toString()).slice(-32_768);

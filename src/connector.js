@@ -30,9 +30,18 @@ export async function run(binary, args, { signal, ms = 10_000 } = {}) {
     child.once('exit', code => code === 0 ? resolve(output) : reject(new CfError('BINARY_EXEC', 'The selected executable returned an error.')));
   });
 }
+// `tunnel run --token-file` arrived in 2025.4.0, JSON log output (`--output json`) in 2025.6.1.
+export const MINIMUM_VERSION = '2025.6.1';
 export function supportedVersion(text) {
   const m = /cloudflared version (\d+)\.(\d+)\.(\d+)/.exec(text);
-  return !!m && (Number(m[1]) > 2025 || (Number(m[1]) === 2025 && Number(m[2]) >= 4));
+  if (!m) return false;
+  const have = m.slice(1, 4).map(Number), need = MINIMUM_VERSION.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
+  return true;
+}
+/** Exact connector argv. Flags are verified against the pinned cloudflared release. */
+export function connectorArgs(configFile, tokenFile) {
+  return ['--no-autoupdate', 'tunnel', '--config', configFile, '--metrics', '127.0.0.1:0', '--output', 'json', 'run', '--token-file', tokenFile];
 }
 function allowedAutoPath(path) {
   const full = resolve(path);
@@ -49,7 +58,7 @@ async function probe(path, signal, explicit = false) {
   demand(stat.isFile() && (process.platform === 'win32' || (stat.mode & 0o022) === 0), 'BINARY_PERMISSIONS', 'Executable must not be group/world writable.');
   if (!explicit) demand(allowedAutoPath(resolved), 'BINARY_PATH', 'Executable is outside trusted installation directories. Select it explicitly.');
   const text = await run(resolved, ['--version'], { signal });
-  demand(supportedVersion(text), 'BINARY_OLD', 'cloudflared 2025.4.0 or later is required. The existing installation was not modified.');
+  demand(supportedVersion(text), 'BINARY_OLD', `cloudflared ${MINIMUM_VERSION} or later is required. The existing installation was not modified.`);
   return { path: resolved, version: text.trim(), source: explicit ? 'selected' : 'installed' };
 }
 export async function ensureBinary({ dir, selected = '', allowDownload = false, signal, onProgress = () => {}, fetchImpl = fetch }) {
@@ -93,7 +102,8 @@ export async function ensureBinary({ dir, selected = '', allowDownload = false, 
       if (received > 150 * 1024 * 1024) return done(new Error('Download limit'));
       hash.update(chunk); onProgress({ phase: 'downloading', received, total: file.size }); done(null, chunk);
     } });
-    const archive = join(staging, 'asset');
+    // Keep the official asset name: Windows only executes a downloaded PE file with its .exe extension.
+    const archive = join(staging, asset);
     await pipeline(Readable.fromWeb(response.body), counter, createWriteStream(archive, { flags: 'wx', mode: 0o600 }), { signal });
     demand(received === file.size && hash.digest('hex') === expected, 'DOWNLOAD_INTEGRITY', 'Downloaded SHA-256 or size does not match the official release.');
     onProgress({ phase: 'verified' });

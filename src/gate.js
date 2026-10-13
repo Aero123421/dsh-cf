@@ -50,9 +50,11 @@ function cleanHeaders(headers, { host, cookie, upgrade = false, response = false
 
 /** Whole-surface Access gate: HTTP, uploads, downloads, SSE, and WebSocket upgrades. */
 export class Gate {
-  constructor({ host, instanceId, adapter, verify, onEvidence = () => {}, maximumBodyBytes = 100 * 1024 * 1024, maximumStreamMs = 15 * 60_000 }) {
+  // Defaults follow the Cloudflare edge: 100 MB request bodies on Free/Pro plans and a 100 s wait for
+  // origin response headers (HTTP 524). Streams are re-authenticated at JWT expiry or after 15 minutes.
+  constructor({ host, instanceId, adapter, verify, onEvidence = () => {}, maximumBodyBytes = 100 * 1024 * 1024, maximumStreamMs = 15 * 60_000, upstreamHeadersMs = 100_000 }) {
     this.host = host; this.instanceId = instanceId; this.adapter = adapter; this.verify = verify; this.onEvidence = onEvidence;
-    this.maximumBodyBytes = maximumBodyBytes; this.maximumStreamMs = maximumStreamMs;
+    this.maximumBodyBytes = maximumBodyBytes; this.maximumStreamMs = maximumStreamMs; this.upstreamHeadersMs = upstreamHeadersMs;
     this.proofNonce = nonce(); this.enabled = false; this.closing = false; this.active = new Set(); this.sockets = new Set(); this.requests = 0;
   }
   async start(port = 0) {
@@ -60,7 +62,9 @@ export class Gate {
     this.server.on('connection', socket => { this.sockets.add(socket); socket.on('close', () => this.sockets.delete(socket)); });
     this.server.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head); });
     this.server.on('clientError', (_error, socket) => socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'));
-    this.server.headersTimeout = 15_000; this.server.requestTimeout = 120_000; this.server.maxRequestsPerSocket = 1000;
+    // Request headers must arrive promptly; a slow upload body is bounded by the per-stream lifetime instead
+    // of Node's whole-request timeout, which would cut legitimate large uploads on slow links.
+    this.server.headersTimeout = 15_000; this.server.requestTimeout = this.maximumStreamMs; this.server.maxRequestsPerSocket = 1000;
     await new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(port, '127.0.0.1', resolve); });
     this.server.on('error', () => { this.enabled = false; });
     this.port = this.server.address().port; return this.port;
@@ -98,7 +102,10 @@ export class Gate {
       const stop = () => { upstream.destroy(); if (!res.writableEnded) res.destroy(); };
       this.active.add(stop);
       const lifetime = setTimeout(stop, Math.max(1, Math.min(identity.expiresAt - Date.now(), this.maximumStreamMs))); lifetime.unref();
-      const handshake = setTimeout(() => upstream.destroy(new Error('Upstream timeout')), 15_000); handshake.unref();
+      // The response-header window starts once the whole request body has been sent: a slow upload is bounded
+      // by the stream lifetime and body limit, not by DSH's processing time.
+      let handshake;
+      upstream.once('finish', () => { if (!upstream.destroyed) { handshake = setTimeout(() => upstream.destroy(new Error('Upstream timeout')), this.upstreamHeadersMs); handshake.unref(); } });
       res.once('close', () => { clearTimeout(lifetime); clearTimeout(handshake); this.active.delete(stop); upstream.destroy(); });
       upstream.once('response', response => {
         clearTimeout(handshake);

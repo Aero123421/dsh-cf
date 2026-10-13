@@ -34,15 +34,24 @@ cloudflared private downloads use a pinned release version and official release 
 
 State/token files are scoped to the active profile, written atomically with POSIX mode 0600 under a 0700 directory. Windows ACLs require environment review. Root/admin access, filesystem snapshots, backups, the same OS user, malicious extensions, and a compromised DSH/runtime can expose these files or process memory. Keep state and token files out of git and shared folders.
 
-## Required live tests before release
+## Profile ownership and copied state
 
-The first implementation has not passed real Cloudflare/DSH/OS end-to-end validation. In particular:
+`owner.lock` keeps two DSH processes from running one profile's connector. It is a lease: the owner refreshes its mtime every few seconds. A lock whose PID is dead in this PID namespace is reclaimed at once. Otherwise (a live PID, or a PID equal to ours, which proves nothing across PID namespaces such as two containers sharing a volume) the lock is reclaimed only if its heartbeat has stopped, observed for longer than one heartbeat interval; a heartbeating lock is refused. The heartbeat assumes a filesystem that updates mtimes, which shared network filesystems may not do reliably. State records a host identity (platform, hostname, home directory). When it differs, the plugin still loads but turns auto-connect off and refuses to connect until the local operator confirms that no other DSH uses the same Tunnel; confirmed identities are remembered. This is an operator safeguard against accidentally running a copied profile twice, not a cryptographic device binding.
 
-- Install the declared `jose` dependency and run the actual RSA/JWT tests without the offline opt-out.
-- Confirm OAuth registration accepts the intended callback and granted scopes, including headless setup.
+## Settings channel
+
+The `/dsh-cf/<action>` channel is registered on DSH's WebServer route table and admits each request with DSH Connection's own Host/Origin/cookie fence (`connection.requestRejection()`), using the same JSON envelope as DSH RPC. `connection.rpc.handle()` is not used because in DSH 0.2.1-alpha.2 it throws for plugin contexts. Over the public hostname the gate additionally allows only the read-only `status` action.
+
+## Live validation status
+
+Validated on real DSH `0.2.1-alpha.2` (npm, Linux, web profile), with Cloudflare's edge emulated by a local TLS proxy and Access JWTs signed by a local RSA key: plugin install and load, settings UI and channel admission, `trustedHosts` persistence through configEditor and the resulting Connection reload, launch-token cookie exchange, HTTP/API/WebSocket proxying, rejection of missing/wrong-owner/expired JWTs and of public management, launch tokens and cross-origin requests, automatic UI reconnection after forced stream closure, boot-time auto-connect launching the real cloudflared 2026.10.0 with its exact flags, connector and guardian cleanup after `kill -9` of DSH, stale-lock recovery, and the host-identity review. The real JOSE RSA/JWT tests run in `npm run check`.
+
+Still required before release:
+
+- Confirm OAuth registration accepts the intended loopback callback and granted scopes, including headless setup.
 - Confirm the current Cloudflare API accepts and read-backs organization/app/policy independent MFA fields exactly as implemented; verify no IdP shortcut weakens the intended WebAuthn requirement.
-- Check denial, normal owner login, incorrect user, expiry, token/key rotation, logout, revoked sessions, and all document/API/WS/file surfaces in actual DSH.
-- Test DSH configEditor reloading, profile persistence, Desktop's dynamic port, Electron child processes, crash recovery, and coexistence with another installed Tunnel on each supported OS.
+- With a real Access application: normal owner login with WebAuthn, incorrect user, expiry, key rotation, logout, revoked sessions, and Tunnel registration through the edge.
+- Desktop's dynamic port, Electron child processes, and coexistence with another installed Tunnel on macOS and Windows.
 - Exercise iPadOS/Safari and credential recovery. Use at least a second registered authenticator/appropriate IdP recovery, managed in Access.
 
 Do not add bypasses to work around a failed integration test. Leave publication stopped, report the failing boundary, and fix the integration.

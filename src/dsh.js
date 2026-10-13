@@ -19,15 +19,23 @@ export class DshAdapter {
     const entry = editor.entries().find(e => e.options.name === '@deepseek-ai/dsh-client-connection');
     demand(entry, 'DSH_CONFIG', 'The active Connection configuration is not editable through this profile.');
     if (this.facts().connection.requestRejection({ headers: { host } }) !== 403) return;
-    await editor.edit(entry, current => {
-      const raw = current.trustedHosts;
-      let trustedHosts;
-      if (raw === undefined) trustedHosts = [host];
-      else if (Array.isArray(raw) && raw.every(x => typeof x === 'string')) trustedHosts = [...new Set([...raw, host])];
-      else if (typeof raw?.__jsExpr === 'string') trustedHosts = { __jsExpr: `[...new Set([...(${raw.__jsExpr}), ${JSON.stringify(host)}])]` };
-      else throw new CfError('DSH_CONFIG', 'Unrecognized trustedHosts configuration. It was not overwritten.');
-      return { ...current, trustedHosts };
-    });
+    try {
+      await editor.edit(entry, current => {
+        const raw = current.trustedHosts;
+        let trustedHosts;
+        if (raw === undefined) trustedHosts = [host];
+        else if (Array.isArray(raw) && raw.every(x => typeof x === 'string')) trustedHosts = [...new Set([...raw, host])];
+        else if (typeof raw?.__jsExpr === 'string') trustedHosts = { __jsExpr: `[...new Set([...(${raw.__jsExpr}), ${JSON.stringify(host)}])]` };
+        else throw new CfError('DSH_CONFIG', 'Unrecognized trustedHosts configuration. It was not overwritten.');
+        return { ...current, trustedHosts };
+      });
+    } catch (e) {
+      if (e instanceof CfError) throw e;
+      // configEditor refuses to persist when a home patch or --patch overlay overrides the Connection row.
+      throw new CfError('DSH_CONFIG', /overridden/i.test(String(e?.message))
+        ? 'DSH could not save the public hostname because a home patch or --patch overlay overrides the Connection settings. Start DSH with --trusted-host for this hostname, or add it to that overlay.'
+        : 'DSH did not accept the trustedHosts change. Nothing else was modified; check the profile configuration and retry.');
+    }
     demand(this.facts().connection.requestRejection({ headers: { host } }) === 401, 'DSH_TRUST', 'DSH did not activate the public hostname. Restart DSH and retry.');
     this.invalidate();
   }

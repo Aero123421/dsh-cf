@@ -4,7 +4,7 @@
 
 DSHの設定画面から、専用のCloudflare Tunnel・DNS・Accessアプリを作成するプラグインです。既存の`cloudflared`を再利用し、所有者のAccessログイン＋WebAuthn追加認証を通してDSHを開きます。Workerのデプロイ、ポート開放、常設の管理サーバーは不要です。
 
-> **0.1.0-alpha.1 / developer preview.** 初版の実装です。実CloudflareアカウントでのOAuth・MFA・Tunnel、実DSHへのインストール、macOS/Windows/iPadOSの実機試験はまだ完了していません。セキュリティ監査済み・本番運用可能とは扱わないでください。パスキー単独ログインではありません。
+> **0.1.0-alpha.2 / developer preview.** 実DSH（`0.2.1-alpha.2`、Linux）へのインストールと、DSH側の連携（設定画面・設定用通信・`trustedHosts`編集・セッション交換・HTTP/API/WebSocket中継・自動再接続・異常終了時の停止）は実機で確認済みです。**実CloudflareアカウントでのOAuth・API作成・Accessログイン/WebAuthn・Tunnel登録と、macOS/Windows/iPadOSの実機試験はまだです。** セキュリティ監査済み・本番運用可能とは扱わないでください。パスキー単独ログインではありません。確認内容の詳細は「検証」を参照してください。
 
 ## 導入
 
@@ -33,7 +33,7 @@ dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<reviewed-commit-sha>'
 3. アカウント、DNSゾーン、既存のAccessログイン方法、専用ホスト名、本人のメールを選びます。ワイルドカードや空の所有者指定は受け付けません。
 4. 必要な場合だけ、組織の利用可能な認証器にbiometrics/security_keyを追加する変更を、内容確認後に許可します。既存IdP・組織の作成は自動化しません。
 5. 「保護設定を作成して接続」。既存バイナリを検出し、なければ明示許可後に専用フォルダへ取得します。DSHの公式configEditorで公開ホストを信頼リストへ追加します。
-6. 「認証器の登録画面」でAccessの認証器を準備し、「本人認証してDSHを確認」を開きます。DSHを実際に開いてHTTP・API・WebSocketの通信を確認すると、最後のチェックが付きます。
+6. 「認証器の登録画面」（Access の App Launcher、`https://<team>.cloudflareaccess.com/`）で **Account → MFA devices** から生体認証またはセキュリティキーを登録し、「本人認証してDSHを確認」を開きます。DSHを実際に開いてHTTP・API・WebSocketの通信を確認すると、最後のチェックが付きます。
 
 以後は`https://mac.example.com/`などの公開URLからアクセスします。複数の閲覧端末は同じURLです。別のDSHは別profile・Tunnel・URLで登録してください。
 
@@ -45,6 +45,7 @@ dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<reviewed-commit-sha>'
 
 - Cloudflare管理下のアクティブなDNSゾーンと、その中の未使用の専用サブドメイン。
 - 初期設定済みのZero Trust/Access組織と、利用するIdP。Email PINも既存IdPとして選べますが、**それだけでなくWebAuthnを要求するアプリ**を作ります。
+- 認証器を登録するための App Launcher。Cloudflareの独立MFAでは、利用者は App Launcher の **Account → MFA devices** から認証器を登録します（直接リンク: `https://<team>.cloudflareaccess.com/AddMfaDevice`）。App Launcher にログインできるよう、Access 設定で App Launcher に本人のメールを許可するポリシーがあることを確認してください。プラグインは App Launcher の設定を変更しません。
 - 本人のメールアドレス。DSH自体は複数の一般利用者を権限分離する設計ではありません。
 - 対象アカウント/ゾーンに必要な権限を持つOAuth grantまたはAPI token。
 
@@ -104,9 +105,11 @@ Browser (HTTPS)
   → existing DSH Web listener (loopback; real dynamic port)
 ```
 
-ゲートは`jose`でRS256署名、issuer、audience、有効期限、token type、所有者メールを検証します。HostとOriginは公開ホストのままDSHへ渡します。`ctx.connection.authenticatedUrl()`で得たDSH起動トークンは**loopbackへの正規Cookie交換だけ**に使います。DSHのCookieはサーバー内部に保持し、ブラウザへのSet-Cookieや状態APIには返しません。
+ゲートは`jose`でRS256署名、issuer、audience、有効期限、token type、所有者メールを検証します。ホストの時計が最大30秒遅れていても発行直後のトークンを受け付けますが、有効期限は延長しません。HostとOriginは公開ホストのままDSHへ渡します。`ctx.connection.authenticatedUrl()`で得たDSH起動トークンは**loopbackへの正規Cookie交換だけ**に使います。DSHのCookieはサーバー内部に保持し、ブラウザへのSet-Cookieや状態APIには返しません。
 
-WebSocketも認証済みupgradeだけを通します。アップロード/ダウンロード/SSEはストリーミング転送し、JWT期限または15分の接続上限で閉じます。DSHが401を返しても変更系リクエストを勝手に再送しません。
+WebSocketも認証済みupgradeだけを通します。アップロード/ダウンロード/SSEはストリーミング転送し、JWT期限または15分の接続上限で閉じます（再認証のため。DSHの画面は自動で再接続することを実機で確認済み）。アップロードは100 MB、DSHの応答待ちは100秒まで（どちらもCloudflareのFree/Proプランの上限に合わせた値）。DSHが401を返しても変更系リクエストを勝手に再送しません。
+
+設定画面とプラグインの通信（`/dsh-cf/<操作>`）は、DSHのWebServerにルートを登録し、DSHのConnectionと同じHost/Origin/Cookie判定（`connection.requestRejection()`）で受け付けます。DSH `0.2.1-alpha.2`の`connection.rpc.handle()`はプラグインのコンテキストから呼ぶと例外になるため使っていません。通信形式は同じです。
 
 `trustedHosts`の既存値を保って公式configEditorから永続化します。DSHが表示する元の`publicUrl`や既存Tailscale設定は変更しません。公開URLのコピーはこのプラグインから行います。`0.0.0.0`公開、Hostのloopback偽装、Origin削除、DSH認証の無効化はしません。
 
@@ -114,7 +117,7 @@ WebSocketも認証済みupgradeだけを通します。アップロード/ダウ
 
 互換な明示パス → 信頼できる一般的なインストール先 → プラグイン専用キャッシュの順で探します。プロジェクトが挿入した任意のPATH上の実行ファイルを自動実行しません。見つからない場合だけ取得許可を求めます。
 
-管理バイナリは`2026.10.0`に固定。公式GitHub ReleaseのSHA-256とサイズを取得し、**検証後にのみ**展開・実行します。公式APIと配布基盤への信頼は必要です。自己管理キャッシュは再実行時にもハッシュを検査します。既存バイナリには`--token-file`を利用できる2025.4.0以降が必要です。
+管理バイナリは`2026.10.0`に固定。公式GitHub ReleaseのSHA-256とサイズを取得し、**検証後にのみ**展開・実行します。公式APIと配布基盤への信頼は必要です。自己管理キャッシュは再実行時にもハッシュを検査します。既存バイナリには **2025.6.1以降**が必要です（`--token-file`は2025.4.0、接続状態の検出に使うJSONログ出力`--output json`は2025.6.1から）。
 
 macOS x64/arm64、Linux x64/arm64/arm、Windows x64/ia32の取得分岐があります。対象外のCPUは手動で実行ファイルを指定してください。**各OSの実機で動作確認済みという意味ではありません。**
 
@@ -126,8 +129,10 @@ macOS x64/arm64、Linux x64/arm64/arm、Windows x64/ia32の取得分岐があり
 
 - 一時停止: ゲートと専用コネクタを閉じ、Cloudflareの専用リソースは保持。
 - 自動接続: 初回の実通信確認後にチェックを有効化した場合だけ、DSH起動時に再接続。
-- 公開設定の削除: ホスト名の再入力を求め、記録済みのIDと所有マーカーを検証して専用DNS → Tunnel → Accessの順で削除。
+- 公開設定の削除: ホスト名の再入力を求め、記録済みのIDと所有マーカーを検証して専用DNS → Tunnel（残っている接続記録を先に消去）→ Accessの順で削除。
 - アンインストール: 先に設定画面から公開設定を削除してから`dsh plugin --profile web remove -w dsh-cf`。共有MFA設定や既存バイナリは残す。
+- ホスト確認: stateには作成したPCの識別値（OS・ホスト名・ホームディレクトリから算出）を記録します。macOSのネットワーク変更やコンテナの再作成などで値が変わると、プラグインは読み込みますが、**接続と自動接続を止めて「このPCで使い続ける」の確認を求めます**。別PCへコピーした設定を同時に動かすと同じTunnelに2台がつながるためです。確認したホストは記憶され、次からは確認不要です。削除操作は確認前でも行えます。
+- プロファイルのロック: 同じprofileを2つのDSHで同時に使えないよう`owner.lock`を置き、使用中のDSHは数秒ごとに更新します。DSHが異常終了して残ったロックは次回起動時に自動で回収します（コンテナ再起動で同じPIDになった場合は、更新が止まっていることを数秒確認してから回収）。更新が続いているロックは、PIDが同じでも（同じボリュームを共有する別コンテナなど）拒否します。
 
 削除時もDSHの既存設定を推測して巻き戻しません。プラグインが追加した`trustedHosts`のホスト名が不要になった場合は、DSH設定でその1件だけを外してください。Hostの信頼設定自体は本人認証を解除するものではありません。
 
@@ -148,18 +153,39 @@ npm run test:live -- https://mac.example.com/ your-team.cloudflareaccess.com
 
 ロックファイルは公式jose `v6.2.12`のimmutable release tarballと公開SHA-256に固定しています。npm/DSH側で依存をインストールしてからテストしてください。
 
-初版作成環境では、依存を取得できないオフライン環境向けの明示モードで**62件成功、JWT実暗号テスト1件スキップ**。これはJOSEの実検証まで成功したという意味ではありません。
-
 ```sh
+# 実際のcloudflaredが接続用の引数をそのまま受け付けるかも確認する（任意・ネットワーク不要）
+DSH_CF_CLOUDFLARED=/path/to/cloudflared npm test
+
 # オフラインの契約/通信テストだけ。リリース判定には使わない。
 DSH_CF_OFFLINE_TEST=1 npm run check
 ```
 
-HTTP/WSの実loopbackソケット、DSH契約を模した上流、偽装ヘッダー拒否、Cookie非流出、POST非再送、OAuth state/PKCE/キャンセル、API競合と不明なPOST、専用子プロセス停止、ファイル権限/ロックをテストしています。Cloudflare APIはテスト用応答です。
+### 自動テスト（0.1.0-alpha.2、Linux x64・Node 22.22）
 
-設定UIはChromiumのテスト用Hook/RPCハーネスで1100px/390px幅、アカウント選択、トークン入力の消去、状態更新、停止ボタン、横はみ出しを確認しています。**実DSHのReact、Safari/Touch ID、実Cloudflareの認証フローは別の検証**です。
+`npm ci && npm run check`で**93件中92件成功、1件は上記の任意テスト**（cloudflared 2026.10.0公式バイナリを指定して実行し成功）。JOSEの実RSA署名検証を含みます。HTTP/WSの実loopbackソケット、DSH契約を模した上流、設定用通信の形式と認証、偽装ヘッダー拒否、Cookie非流出、POST非再送、OAuth state/PKCE/キャンセル/取り消し、API競合と不明なPOST、ページング、Tunnel削除前の接続消去、専用子プロセス停止、ファイル権限/ロック/ホスト確認をテストしています。Cloudflare APIはテスト用応答です。
 
-公開前に最低限、`npm ci && npm run check`、実DSHインストールと再起動、OAuthの同一PC/SSH構成、WebAuthn登録と紛失復旧、Accessポリシー/失効、Mac/Windows/Linux、iPadOSの実操作を確認してください。`SECURITY.md`も参照してください。
+### 実DSHでの確認（0.1.0-alpha.2）
+
+npm公開版のDSH `@deepseek-ai/dsh@0.2.1-alpha.2`（Linux、webプロファイル）に、READMEの`dsh plugin --profile web add`でインストールして確認しました。
+
+| 項目 | 結果 |
+|---|---|
+| `github:Aero123421/dsh-cf`からのインストール | ✓ |
+| 設定画面にCloudflareの項目が出て、状態を取得できる（Chromium、1280/768/390px幅） | ✓ |
+| 設定用通信：DSHのCookieなしは401、別ホストは403 | ✓ |
+| 公式configEditorでの`trustedHosts`追記（既存の`!!js`式を保持）と、その後のConnection再読込 | ✓ |
+| DSHの起動トークン→Cookie交換（loopback） | ✓ |
+| ゲート経由でDSHの画面・API・WebSocketが動く（TLS終端とAccess JWT付与を模した前段＋ローカルRSA鍵で署名したJWT） | ✓ |
+| JWTなし／別のメール／期限切れは401、公開URLからの設定変更・起動トークン・異なるOriginは403、Set-Cookieは出ない | ✓ |
+| 15分上限で切れたWebSocketをDSHの画面が自動で再接続する（上限を12秒にして確認） | ✓ |
+| DSH起動時の自動接続 → cloudflared 2026.10.0を正しい引数で起動 → 登録できない場合はエラー表示して子プロセスを停止 | ✓ |
+| DSHを`kill -9`した後、cloudflaredと監視プロセスが自動で終了し、次回起動時に残ったロックを回収 | ✓ |
+| ホスト識別値が変わったときの確認カードと、確認後の再接続 | ✓ |
+
+**未確認:** 実CloudflareアカウントでのOAuth（loopbackコールバックの登録可否を含む）、APIによる作成と読み戻し（Accessアプリの`mfa_config`の返し方など）、Accessログインと実WebAuthn、Tunnelの実登録、`npm run test:live`、macOS/Windows/iPadOS/Safari、DSH Desktop。この検証環境からCloudflare APIへは接続できないため、これらは自分のテスト用アカウントとホスト名で確認してください。
+
+公開前に最低限、`npm ci && npm run check`、上記の未確認項目、WebAuthn登録と紛失復旧、Accessポリシー/失効を確認してください。`SECURITY.md`も参照してください。
 
 ## 課金とスコープ
 

@@ -1,6 +1,7 @@
 import { CfError, demand, hostname, email, cfId, issuer, boundedJson, timeout, digest } from './common.js';
 
 const API = 'https://api.cloudflare.com/client/v4';
+const PER_PAGE = 50;
 const MFA = { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'], session_duration: '1h' };
 const id = value => encodeURIComponent(value);
 const exact = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -10,19 +11,29 @@ export class Cloudflare {
     demand(path.startsWith('/') && !path.startsWith('//'), 'API_PATH', 'Invalid Cloudflare API path.');
     let response;
     try { response = await this.fetch(API + path, { method, redirect: 'error', signal: timeout(signal), headers: { Authorization: `Bearer ${this.token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
-    catch (e) { if (signal?.aborted) throw e; throw new CfError('CF_NETWORK', 'Cloudflare did not return a response. A recorded write may need reconciliation before retrying.'); }
+    catch (e) {
+      if (signal?.aborted) throw e;
+      // Only a create (POST) is recorded as a pending write; PUT/DELETE here are idempotent and safe to retry.
+      throw new CfError('CF_NETWORK', method === 'GET'
+        ? 'Cloudflare did not respond. Check this computer’s connection to api.cloudflare.com and retry.'
+        : method === 'POST'
+          ? 'Cloudflare did not return a response. A recorded write may need reconciliation before retrying.'
+          : 'Cloudflare did not respond, so the change may or may not have been applied. Check connectivity and retry.');
+    }
     const data = await boundedJson(response);
-    demand(response.ok && data.success === true, `CF_${response.status}`, `Cloudflare API returned HTTP ${response.status}. Check the selected resources and token permissions.`, {});
+    demand(response.ok && data.success === true, `CF_${response.status}`, `Cloudflare API returned HTTP ${response.status}. Check the selected resources and token permissions.`);
     return data;
   }
   async get(path, signal) { return (await this.call('GET', path, undefined, signal)).result; }
   async list(path, signal) {
     const out = [];
     for (let page = 1; page <= 100; page++) {
-      const data = await this.call('GET', `${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`, undefined, signal);
+      // 50 is the documented maximum for /accounts and /zones and is valid for every list used here.
+      const data = await this.call('GET', `${path}${path.includes('?') ? '&' : '?'}per_page=${PER_PAGE}&page=${page}`, undefined, signal);
       demand(Array.isArray(data.result), 'CF_LIST', 'Cloudflare returned an invalid resource list.');
       out.push(...data.result);
-      if (data.result.length < 100 || (data.result_info?.total_pages && page >= data.result_info.total_pages)) return out;
+      const total = data.result_info?.total_pages;
+      if (Number.isInteger(total) && total > 0 ? page >= total : data.result.length < PER_PAGE) return out;
     }
     throw new CfError('CF_LIST', 'Resource list exceeded the bounded pagination limit.');
   }
@@ -166,6 +177,10 @@ export async function removeOwned(cf, store, signal) {
     let tunnel; try { tunnel = await cf.get(path, signal); } catch (e) { if (e.code !== 'CF_404') throw e; }
     if (tunnel && !tunnel.deleted_at) {
       demand(tunnel.name === `dsh-cf-${instanceId}`, 'TUNNEL_CHANGED', 'Tunnel ownership could not be verified; deletion stopped.');
+      // A Tunnel must have no active connections before deletion. Our own connector is already stopped;
+      // remove the edge's stale connection records for this owned Tunnel only.
+      try { await cf.call('DELETE', `${path}/connections`, undefined, signal); }
+      catch (e) { if (e.code !== 'CF_404') throw e; }
       await cf.call('DELETE', path, undefined, signal);
     }
     delete owned.tunnelId; delete owned.ingressConfigured; await store.clearToken(); await store.save();
