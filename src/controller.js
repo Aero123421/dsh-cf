@@ -16,8 +16,8 @@ export class Controller {
     this.seq = 0; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
     this.phase = 'idle'; this.error = null; this.operation = null; this.gate = null; this.connector = null;
     this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null;
-    this.authGeneration = 0; this.evidence = {}; this.binary = null; this.disposed = false;
-    this.oauth = new OAuth({ fetchImpl, onToken: async (token, until, signal) => this.authorized(token, until, 'oauth', signal), onState: status => { this.step('authorization', status === 'complete' ? 'done' : 'waiting', status); } });
+    this.authGeneration = 0; this.requests = new Set(); this.stopping = null; this.closingRuntime = null; this.forgetting = null; this.evidence = {}; this.binary = null; this.disposed = false;
+    this.oauth = new OAuth({ fetchImpl, onToken: (token, until, signal, generation) => this.authorized(token, until, 'oauth', signal, generation), onState: status => { this.step('authorization', status === 'complete' ? 'done' : 'waiting', status); } });
     store.onOwnershipLost = async () => {
       try { await this.stop(); }
       finally { this.phase = 'error'; this.error = { code: 'LOCK', message: 'Profile ownership was lost. Publication was stopped. Stop the other DSH before reopening this profile.' }; this.changed(); }
@@ -29,19 +29,71 @@ export class Controller {
     Object.assign(step, { status, message }); this.changed();
   }
   cf() { demand(this.token && Date.now() < this.tokenUntil, 'AUTHORIZE', 'Authorize Cloudflare again. Management grants are intentionally not stored on disk.'); return new Cloudflare(this.token, this.fetch); }
-  async authorized(token, until, type, signal) {
-    const generation = ++this.authGeneration;
-    const cf = new Cloudflare(token, this.fetch); const accounts = await cf.accounts(signal);
+  invalidateAuthorization() {
+    this.authGeneration++;
+    for (const request of this.requests) request.abort.abort(new DOMException('Cancelled', 'AbortError'));
+    return this.authGeneration;
+  }
+  checkAuthorization(generation, signal) {
+    signal.throwIfAborted();
     demand(generation === this.authGeneration, 'OAUTH_EXPIRED', 'This authorization was superseded or cancelled.');
-    signal?.throwIfAborted();
-    demand(!this.disposed, 'STOPPED', 'Plugin is stopping.');
-    this.token = token; this.tokenUntil = until; this.grantType = type; this.accountList = accounts; this.accountDetails = null;
-    this.step('authorization', 'done', 'Cloudflare API authorization verified'); this.changed(); return { accounts };
+    demand(!this.disposed && !this.stopping, 'STOPPED', 'Plugin is stopping.');
+    demand(!this.operation, 'BUSY', 'Another operation is still in progress.');
+  }
+  request(run, generation = this.authGeneration, parentSignal) {
+    const request = { abort: new AbortController(), promise: null };
+    const signal = parentSignal ? AbortSignal.any([request.abort.signal, parentSignal]) : request.abort.signal;
+    this.requests.add(request); this.changed();
+    request.promise = Promise.resolve().then(() => {
+      this.checkAuthorization(generation, signal);
+      return run(signal, () => this.checkAuthorization(generation, signal));
+    }).finally(() => { this.requests.delete(request); this.changed(); });
+    return request.promise;
+  }
+  authorized(token, until, type, signal, generation) {
+    let cancelled;
+    if (generation === undefined) {
+      generation = this.invalidateAuthorization();
+      cancelled = this.oauth.cancel();
+    }
+    return this.request(async (signal, check) => {
+      await cancelled; check();
+      const cf = new Cloudflare(token, this.fetch); const accounts = await cf.accounts(signal);
+      check();
+      this.token = token; this.tokenUntil = until; this.grantType = type; this.accountList = accounts; this.accountDetails = null;
+      this.step('authorization', 'done', 'Cloudflare API authorization verified'); this.changed(); return { accounts };
+    }, generation, signal);
+  }
+  account(payload, enableMfa = false) {
+    demand(!this.requests.size, 'BUSY', 'Another management request is still in progress.');
+    const cf = this.cf();
+    return this.request(async (signal, check) => {
+      const details = enableMfa ? await cf.enableMfa(payload.accountId, payload.revision, signal) : await cf.account(payload.accountId, signal);
+      check();
+      this.accountDetails = { ...details, accountId: payload.accountId }; this.changed(); return this.accountDetails;
+    });
+  }
+  forget(revoke) {
+    this.invalidateAuthorization();
+    const requests = [...this.requests].map(request => request.promise);
+    const cancelled = this.oauth.cancel();
+    const abort = new AbortController();
+    const token = this.token, type = this.grantType, clientId = this.oauth.grantClientId;
+    this.oauth.grantClientId = null;
+    this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null; this.changed();
+    const forgetting = { abort, promise: null };
+    this.forgetting = forgetting;
+    forgetting.promise = Promise.resolve().then(async () => {
+      await cancelled; await Promise.allSettled(requests);
+      if (revoke && type === 'oauth') await this.oauth.revoke(token, abort.signal, clientId);
+      return {};
+    }).finally(() => { if (this.forgetting === forgetting) this.forgetting = null; this.changed(); });
+    return forgetting.promise;
   }
   snapshot() {
     const s = this.store.state;
     return {
-      sequence: this.seq, operationId: this.operation?.id ?? null, busy: !!this.operation, phase: this.phase,
+      sequence: this.seq, operationId: this.operation?.id ?? null, busy: !!(this.operation || this.stopping || this.forgetting || this.requests.size), phase: this.phase,
       steps: this.steps.map(s => ({ ...s })), error: this.error,
       instanceId: s.instanceId, setup: s.setup, autoConnect: s.autoConnect, gatePort: s.gatePort,
       resources: { ...s.owned }, pendingWrite: s.pending ? { kind: s.pending.kind, at: s.pending.at } : null,
@@ -72,18 +124,18 @@ export class Controller {
     if (endpoint === 'status') return this.snapshot();
     demand(!this.disposed, 'STOPPED', 'Plugin is stopping.');
     if (endpoint === 'stop' || endpoint === 'cancel') { await this.stop(); return this.snapshot(); }
-    demand(!this.operation, 'BUSY', 'Another operation is still in progress.');
+    demand(!this.operation && !this.stopping && !this.forgetting, 'BUSY', 'Another operation is still in progress.');
     switch (endpoint) {
       case 'authorize':
         demand(typeof payload.token === 'string' && payload.token.length <= 16_384, 'API_TOKEN', 'Invalid API token.');
         return this.authorized(payload.token.trim(), Date.now() + 60 * 60_000, 'api');
-      case 'oauth/start': return this.oauth.begin({ clientId: payload.clientId || this.config.oauthClientId, scopes: payload.scopes || this.config.oauthScopes, port: this.config.oauthCallbackPort || 8789 });
+      case 'oauth/start': return this.oauth.begin({ authorizationId: this.invalidateAuthorization(), clientId: payload.clientId || this.config.oauthClientId, scopes: payload.scopes || this.config.oauthScopes, port: this.config.oauthCallbackPort || 8789 });
       case 'oauth/finish': return this.oauth.finish(payload.redirectUrl);
       case 'oauth/cancel': await this.oauth.cancel(); this.step('authorization', 'idle', 'Cancelled'); return {};
-      case 'account': this.accountDetails = { ...await this.cf().account(payload.accountId), accountId: payload.accountId }; this.changed(); return this.accountDetails;
+      case 'account': return this.account(payload);
       case 'mfa/enable':
         demand(payload.approved === true, 'CONSENT', 'Review and explicitly approve the additive organization MFA change.');
-        this.accountDetails = { ...await this.cf().enableMfa(payload.accountId, payload.revision), accountId: payload.accountId }; this.changed(); return this.accountDetails;
+        return this.account(payload, true);
       case 'start': this.hostConfirmed(); return this.launch(signal => this.start(payload, signal, false));
       case 'resume': this.hostConfirmed(); return this.launch(signal => this.start({}, signal, true));
       case 'host/confirm':
@@ -94,16 +146,7 @@ export class Controller {
         demand(!payload.enabled || this.store.state.proven === true, 'VERIFY_FIRST', 'Complete browser/API/WebSocket verification before enabling auto-connect.');
         if (payload.enabled) this.hostConfirmed();
         this.store.state.autoConnect = payload.enabled; await this.store.save(); this.changed(); return {};
-      case 'forget': {
-        this.authGeneration++;
-        let revokeError = null;
-        if (payload.revoke === true && this.grantType === 'oauth') { try { await this.oauth.revoke(this.token); } catch (e) { revokeError = e; } }
-        // The local grant is always forgotten, even when remote revocation is not confirmed.
-        await this.oauth.cancel(); this.oauth.grantClientId = null;
-        this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null; this.changed();
-        if (revokeError) throw revokeError;
-        return {};
-      }
+      case 'forget': return this.forget(payload.revoke === true);
       case 'remove': {
         demand(payload.confirmHostname === this.store.state.setup?.hostname && !!payload.confirmHostname, 'CONFIRM_DELETE', 'Type this instance’s exact hostname to delete its public resources.');
         const cf = this.cf();
@@ -117,7 +160,8 @@ export class Controller {
     }
   }
   launch(run) {
-    demand(!this.operation, 'BUSY', 'An operation is already in progress.');
+    demand(!this.disposed, 'STOPPED', 'Plugin is stopping.');
+    demand(!this.operation && !this.stopping && !this.forgetting && !this.requests.size, 'BUSY', 'An operation is already in progress.');
     const operation = { id: randomUUID(), abort: new AbortController(), promise: null };
     this.operation = operation; this.error = null; this.changed();
     operation.promise = Promise.resolve().then(() => run(operation.abort.signal)).catch(async error => {
@@ -129,14 +173,14 @@ export class Controller {
     return { operationId: operation.id };
   }
   async start(input, signal, resume) {
-    await this.closeRuntime(); this.evidence = {}; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
+    await this.closeRuntime(); signal.throwIfAborted(); this.evidence = {}; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
     this.phase = 'configuring'; this.step('environment', 'working', 'Checking DSH and cloudflared');
     this.hostConfirmed();
     await this.dshFacts(signal);
     const s = this.store.state;
     const setup = resume ? s.setup : await this.cf().validateSetup(input, signal);
     demand(setup, 'SETUP', 'Complete initial setup first.');
-    if (resume) demand(s.owned.audience && s.owned.dnsId && !s.pending && await this.store.hasToken(), 'SETUP', 'Initial provisioning did not finish. Authorize and retry setup.');
+    if (resume) demand(s.lastConfigurationCheck && s.owned.audience && s.owned.dnsId && !s.pending && await this.store.hasToken(), 'SETUP', 'Initial provisioning did not finish. Authorize and retry setup.');
     const selected = input.cloudflaredPath || this.config.cloudflaredPath || s.selectedBinary || '';
     this.binary = await this.deps.ensureBinary({ dir: this.store.dir, selected, allowDownload: !resume && input.allowDownload === true, signal, fetchImpl: this.fetch, onProgress: value => { this.download = value; this.changed(); } });
     this.download = null; s.selectedBinary = selected; await this.store.save();
@@ -149,6 +193,9 @@ export class Controller {
     const port = await gate.start(s.gatePort || 0); s.gatePort = port; await this.store.save();
     try {
       if (!resume) {
+        // A failed read-back must not be bypassed by resuming retained resource IDs.
+        s.lastConfigurationCheck = null; await this.store.save();
+        signal.throwIfAborted();
         await this.deps.provision(this.cf(), this.store, setup, port, signal, phase => this.step(phase === 'access' ? 'access' : 'tunnel', 'working', `Configuring ${phase}`));
         s.lastConfigurationCheck = new Date().toISOString(); await this.store.save();
       }
@@ -221,17 +268,30 @@ export class Controller {
     void this.store.save().catch(async () => { await this.closeRuntime(); this.phase = 'error'; this.error = { code: 'STATE_WRITE', message: 'Verification state could not be saved. Publication was stopped.' }; this.changed(); });
     this.changed();
   }
-  async closeRuntime() {
+  closeRuntime() {
+    if (this.closingRuntime) return this.closingRuntime;
     const gate = this.gate; this.gate = null;
     const connector = this.connector; this.connector = null;
-    try { await gate?.close(); } finally { try { await connector?.stop(); } finally { this.adapter.invalidate(); } }
+    const closing = Promise.resolve().then(async () => {
+      try { await gate?.close(); } finally { try { await connector?.stop(); } finally { this.adapter.invalidate(); } }
+    }).finally(() => { if (this.closingRuntime === closing) this.closingRuntime = null; });
+    this.closingRuntime = closing;
+    return closing;
   }
-  async stop() {
-    this.authGeneration++;
-    await this.oauth.cancel();
+  stop() {
+    if (this.stopping) return this.stopping;
+    this.invalidateAuthorization();
+    const cancelled = this.oauth.cancel();
     const operation = this.operation;
-    operation?.abort.abort(new DOMException('Cancelled', 'AbortError')); await operation?.promise;
-    await this.closeRuntime(); this.phase = 'stopped'; this.step('tunnel', 'idle', 'Stopped locally; Cloudflare resources are retained'); this.changed();
+    operation?.abort.abort(new DOMException('Cancelled', 'AbortError'));
+    this.forgetting?.abort.abort(new DOMException('Cancelled', 'AbortError'));
+    const work = [operation?.promise, this.forgetting?.promise, ...[...this.requests].map(request => request.promise)];
+    const stopping = Promise.resolve().then(async () => {
+      await cancelled; await Promise.allSettled(work);
+      await this.closeRuntime(); this.phase = 'stopped'; this.step('tunnel', 'idle', 'Stopped locally; Cloudflare resources are retained'); this.changed();
+    }).finally(() => { if (this.stopping === stopping) this.stopping = null; this.changed(); });
+    this.stopping = stopping; this.changed();
+    return stopping;
   }
   async dispose() {
     this.disposed = true;

@@ -42,6 +42,25 @@ test('MFA shared change requires fresh revision and preserves existing organizat
   assert.deepEqual(f.data.organization.mfa_config.allowed_authenticators, ['totp', 'biometrics', 'security_key']);
   assert.equal(f.data.organization.mfa_required_for_all_apps, false); assert.equal(f.data.organization.name, 'Existing organization');
 });
+test('an already cancelled Cloudflare call never reaches a fetch implementation that ignores signals', async () => {
+  let calls = 0;
+  const cf = new Cloudflare('test-management-token-123456789', async () => { calls++; return Response.json({ success: true, result: {} }); });
+  const abort = new AbortController(); abort.abort();
+  await assert.rejects(cf.call('PUT', `/accounts/${ACCOUNT}/access/organizations`, {}, abort.signal), { name: 'AbortError' });
+  assert.equal(calls, 0);
+});
+test('cancelled MFA read cannot issue a later PUT when the fetch implementation ignores signals', async () => {
+  const f = make(); const account = await f.cf.account(ACCOUNT);
+  const reading = Promise.withResolvers(), response = Promise.withResolvers();
+  f.data.fail = async ({ p, method }) => {
+    if (method === 'GET' && p.endsWith('/access/organizations')) { reading.resolve(); await response.promise; }
+  };
+  const abort = new AbortController();
+  const enabling = f.cf.enableMfa(ACCOUNT, account.organizationRevision, abort.signal);
+  const rejected = assert.rejects(enabling, { name: 'AbortError' });
+  await reading.promise; abort.abort(); response.resolve(); await rejected;
+  assert.equal(f.data.writes.length, 0);
+});
 test('additional allow or bypass policy fails closed', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000);
   f.data.policies.get('app-1').push({ decision: 'bypass', include: [{ everyone: {} }] });
@@ -56,6 +75,61 @@ test('changed ingress is refused rather than silently repaired', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000);
   f.data.configs.get('tunnel-1').config.ingress[0].service = 'http://other.internal:80';
   await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'TUNNEL_CHANGED' });
+});
+test('changed Tunnel Access team is rejected without overwriting the existing ingress', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  f.data.configs.get('tunnel-1').config.ingress[0].originRequest.access.teamName = 'another-team';
+  const writes = f.data.writes.length;
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'TUNNEL_CHANGED' });
+  assert.equal(f.data.writes.length, writes);
+  assert.equal(f.data.configs.get('tunnel-1').config.ingress[0].originRequest.access.teamName, 'another-team');
+});
+test('initial ingress write must read back the requested routing before DNS is created', async () => {
+  const f = make();
+  f.data.fail = ({ p, method, body }) => {
+    if (method === 'PUT' && p.endsWith('/configurations')) body.config.ingress = [];
+  };
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'TUNNEL_CHANGED' });
+  assert.equal(f.store.state.owned.ingressConfigured, undefined);
+  assert.equal(f.data.records.length, 0);
+  assert.equal(f.store.saves.at(-1).owned.tunnelId, 'tunnel-1');
+  assert.equal(f.store.saves.at(-1).pending, null);
+  f.data.fail = null; await removeOwned(f.cf, f.store);
+  assert.deepEqual(f.store.state.owned, {});
+});
+test('an unavailable initial ingress readback retains owned IDs and retry does not duplicate resources', async () => {
+  const f = make();
+  f.data.fail = ({ p, method }) => { if (method === 'GET' && p.endsWith('/configurations')) throw new Error('readback unavailable'); };
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_NETWORK' });
+  assert.equal(f.store.state.owned.ingressConfigured, undefined);
+  assert.equal(f.store.saves.at(-1).owned.tunnelId, 'tunnel-1');
+  assert.equal(f.store.state.pending, null);
+  f.data.fail = null; await provision(f.cf, f.store, SETUP, 4000);
+  assert.equal(f.store.state.owned.ingressConfigured, true);
+  assert.equal(f.data.writes.filter(w => w.method === 'POST').length, 3);
+});
+test('initial DNS readback rejects an unproxied record while retaining its ID for cleanup', async () => {
+  const f = make();
+  f.data.fail = ({ p, method, body }) => { if (method === 'POST' && p.endsWith('/dns_records')) body.proxied = false; };
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'DNS_CHANGED' });
+  assert.equal(f.store.saves.at(-1).owned.dnsId, 'dns-1');
+  assert.equal(f.store.saves.at(-1).pending, null);
+  const writes = f.data.writes.length;
+  f.data.fail = null;
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'DNS_CHANGED' });
+  assert.equal(f.data.writes.length, writes);
+  await removeOwned(f.cf, f.store);
+  assert.deepEqual(f.store.state.owned, {}); assert.equal(f.data.records.length, 0);
+});
+test('an unavailable initial DNS readback preserves the known result and retry does not repeat POST', async () => {
+  const f = make();
+  f.data.fail = ({ p, method }) => { if (method === 'GET' && p.endsWith('/dns_records/dns-1')) throw new Error('readback unavailable'); };
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_NETWORK' });
+  assert.equal(f.store.saves.at(-1).owned.dnsId, 'dns-1');
+  assert.equal(f.store.saves.at(-1).pending, null);
+  const writes = f.data.writes.length;
+  f.data.fail = null; await provision(f.cf, f.store, SETUP, 4000);
+  assert.equal(f.data.writes.length, writes);
 });
 test('remove verifies owned IDs, deletes DNS first, and leaves shared MFA untouched', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000); const org = JSON.stringify(f.data.organization); const from = f.data.writes.length;

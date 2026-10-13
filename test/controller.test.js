@@ -125,3 +125,130 @@ test('resource deletion requires exact typed hostname confirmation', async t => 
   const f = await fixture(t); f.store.state.setup = SETUP;
   await assert.rejects(f.controller.handle('remove', { confirmHostname: 'other.example.com' }), { code: 'CONFIRM_DELETE' });
 });
+
+const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const oauthPayload = { clientId: 'test-public-client', scopes: ['test.scope'] };
+const oauthCallback = flow => `${flow.redirectUri}?code=fixture&state=${new URL(flow.authorizationUrl).searchParams.get('state')}`;
+
+test('concurrent stop and dispose share shutdown and retain ownership until the connector exits', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  const entered = deferred(), release = deferred(); let stops = 0;
+  f.connector.stop = async () => { stops++; entered.resolve(); await release.promise; };
+  const stopping = f.controller.handle('stop'); await entered.promise;
+  assert.equal(f.controller.snapshot().busy, true);
+  await assert.rejects(f.controller.handle('resume'), { code: 'BUSY' });
+  await assert.rejects(f.controller.handle('authorize', { token: 'new-management-token-123456' }), { code: 'BUSY' });
+  let disposed = false;
+  const disposing = f.controller.dispose().then(() => { disposed = true; });
+  await tick(); assert.equal(disposed, false); assert.equal(f.store.closed, false); assert.equal(stops, 1);
+  release.resolve(); await Promise.all([stopping, disposing]);
+  assert.equal(stops, 1); assert.equal(f.store.closed, true); assert.equal(f.controller.phase, 'stopped');
+});
+test('dispose waits for cleanup already started by a fatal connector event', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  const entered = deferred(), release = deferred();
+  f.connector.stop = async () => { entered.resolve(); await release.promise; };
+  f.connector.status('error'); await entered.promise;
+  const disposing = f.controller.dispose(); await tick(); assert.equal(f.store.closed, false);
+  release.resolve(); await disposing; assert.equal(f.store.closed, true);
+});
+test('API authorization supersedes an older OAuth exchange before its token arrives', async t => {
+  const api = fakeCloudflare(), entered = deferred(), release = deferred();
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, config: { oauthCallbackPort: await freePort() }, fetchImpl: async (url, options) => {
+    if (String(url).endsWith('/oauth2/token')) { entered.resolve(); await release.promise; return Response.json({ access_token: 'old-oauth-management-token-123', token_type: 'Bearer', expires_in: 300 }); }
+    return api.fetchImpl(url, options);
+  } });
+  t.after(() => controller.dispose());
+  const flow = await controller.handle('oauth/start', oauthPayload);
+  const old = assert.rejects(controller.handle('oauth/finish', { redirectUrl: oauthCallback(flow) })); await entered.promise;
+  await controller.handle('authorize', { token: 'new-api-management-token-123' });
+  release.resolve(); await old;
+  assert.equal(controller.token, 'new-api-management-token-123'); assert.equal(controller.grantType, 'api'); assert.equal(controller.oauth.pending, null);
+});
+test('starting OAuth supersedes an API authorization already waiting for accounts', async t => {
+  const api = fakeCloudflare(), entered = deferred(), release = deferred(); let hold = true;
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, config: { oauthCallbackPort: await freePort() }, fetchImpl: async (url, options) => {
+    if (hold) { hold = false; entered.resolve(); await release.promise; }
+    if (String(url).endsWith('/oauth2/token')) return Response.json({ access_token: 'new-oauth-management-token-123', token_type: 'Bearer', expires_in: 300 });
+    return api.fetchImpl(url, options);
+  } });
+  t.after(() => controller.dispose());
+  const old = assert.rejects(controller.handle('authorize', { token: 'old-api-management-token-123' })); await entered.promise;
+  const flow = await controller.handle('oauth/start', oauthPayload);
+  release.resolve(); await old; assert.equal(controller.token, null);
+  await controller.handle('oauth/finish', { redirectUrl: oauthCallback(flow) });
+  assert.equal(controller.token, 'new-oauth-management-token-123'); assert.equal(controller.grantType, 'oauth');
+});
+for (const endpoint of ['stop', 'forget']) test(`${endpoint} aborts and drains an MFA change before a new PUT can be sent`, async t => {
+  const api = fakeCloudflare(), entered = deferred(), release = deferred(); let hold = false, requestSignal;
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, fetchImpl: async (url, options) => {
+    options.signal.throwIfAborted(); // The native fetch boundary refuses an already aborted request.
+    if (hold && String(url).endsWith('/access/organizations') && options.method === 'GET') {
+      hold = false; requestSignal = options.signal; entered.resolve(); await release.promise;
+    }
+    return api.fetchImpl(url, options);
+  } });
+  t.after(() => controller.dispose());
+  await controller.handle('authorize', { token: 'management-token-fixture-123' });
+  const account = await controller.handle('account', { accountId: SETUP.accountId }); hold = true;
+  const changing = assert.rejects(controller.handle('mfa/enable', { accountId: SETUP.accountId, revision: account.organizationRevision, approved: true }));
+  await entered.promise; assert.equal(controller.snapshot().busy, true);
+  let finished = false; const cancelling = controller.handle(endpoint).then(() => { finished = true; });
+  await tick(); assert.equal(requestSignal.aborted, true); assert.equal(finished, false);
+  release.resolve(); await Promise.all([changing, cancelling]);
+  assert.equal(api.data.writes.length, 0);
+  if (endpoint === 'forget') { assert.equal(controller.accountDetails, null); assert.equal(controller.token, null); }
+});
+test('forget prevents a late account response from restoring account state', async t => {
+  const api = fakeCloudflare(), entered = deferred(), release = deferred(); let hold = false;
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, fetchImpl: async (url, options) => {
+    if (hold && String(url).endsWith('/access/organizations')) { entered.resolve(); await release.promise; }
+    return api.fetchImpl(url, options); // Deliberately complete after abort to exercise the commit guard.
+  } });
+  t.after(() => controller.dispose()); await controller.handle('authorize', { token: 'management-token-fixture-123' }); hold = true;
+  const reading = assert.rejects(controller.handle('account', { accountId: SETUP.accountId })); await entered.promise;
+  const forgetting = controller.handle('forget'); release.resolve(); await Promise.all([reading, forgetting]);
+  assert.equal(controller.accountDetails, null); assert.equal(controller.accountList.length, 0); assert.equal(controller.token, null);
+});
+test('stop drains revocation and forget cannot erase a subsequently admitted grant', async t => {
+  const f = await fixture(t), entered = deferred(), release = deferred(); f.controller.grantType = 'oauth';
+  let signal;
+  f.controller.oauth.revoke = async (_token, abortSignal) => { signal = abortSignal; entered.resolve(); await release.promise; abortSignal.throwIfAborted(); };
+  const forgetting = assert.rejects(f.controller.handle('forget', { revoke: true })); await entered.promise;
+  await assert.rejects(f.controller.handle('authorize', { token: 'new-management-token-123456' }), { code: 'BUSY' });
+  let stopped = false; const stopping = f.controller.handle('stop').then(() => { stopped = true; });
+  await tick(); assert.equal(signal.aborted, true); assert.equal(stopped, false);
+  release.resolve(); await Promise.all([forgetting, stopping]);
+  await f.controller.handle('authorize', { token: 'new-management-token-123456' });
+  assert.equal(f.controller.token, 'new-management-token-123456');
+});
+test('failed configuration read-back invalidates resume even when prior resource IDs and token remain', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  assert(f.store.state.lastConfigurationCheck);
+  f.controller.deps.provision = async () => { throw new CfError('DNS_CHANGED', 'Read-back did not match'); };
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  assert.equal(f.store.state.lastConfigurationCheck, null); assert(f.store.state.owned.dnsId); assert(await f.store.hasToken());
+  await f.controller.handle('resume'); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'error'); assert.equal(f.controller.error.code, 'SETUP'); assert.equal(f.controller.connector, null);
+});
+test('forget revokes with the captured client identity after clearing the local grant', async t => {
+  const f = await fixture(t); f.controller.grantType = 'oauth'; f.controller.oauth.grantClientId = 'fixture-client-id';
+  let form;
+  f.controller.oauth.fetch = async (_url, options) => { assert.equal(f.controller.token, null); form = options.body; return new Response(null); };
+  await f.controller.handle('forget', { revoke: true });
+  assert.equal(form.get('client_id'), 'fixture-client-id'); assert.equal(form.get('token'), 'management-secret-test-123456');
+  assert.equal(f.controller.oauth.grantClientId, null);
+});
+test('a loopback OAuth callback cannot replace credentials during provisioning', async t => {
+  const entered = deferred(), release = deferred();
+  const f = await fixture(t, { ensureBinary: async () => { entered.resolve(); await release.promise; return { path: '/fixture', source: 'fixture', version: 'fixture' }; } });
+  f.controller.config.oauthCallbackPort = await freePort();
+  f.controller.oauth.fetch = async () => Response.json({ access_token: 'late-oauth-management-token-123', token_type: 'Bearer', expires_in: 300 });
+  const flow = await f.controller.handle('oauth/start', oauthPayload);
+  await f.controller.handle('start', SETUP); const operation = f.controller.operation.promise; await entered.promise;
+  // The HTTP listener calls OAuth.finish directly, outside the controller's RPC admission check.
+  await assert.rejects(f.controller.oauth.finish(oauthCallback(flow)), { code: 'BUSY' });
+  assert.equal(f.controller.token, 'management-secret-test-123456');
+  release.resolve(); await operation; assert.equal(f.controller.phase, 'waiting-browser');
+});

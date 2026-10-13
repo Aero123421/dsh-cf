@@ -26,6 +26,7 @@ window.__ModuleLoader__.load({
     function Panel({ connection }) {
       const [state, setState] = React.useState(null);
       const [error, setError] = React.useState('');
+      const [connectionError, setConnectionError] = React.useState('');
       const [pending, setPending] = React.useState(false);
       const [token, setToken] = React.useState('');
       const [clientId, setClientId] = React.useState('');
@@ -55,8 +56,8 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         mounted.current = true; let cancelled = false, timer;
         const refresh = async () => {
-          try { const value = await call('status'); if (!cancelled) merge(value); }
-          catch { if (!cancelled) setError('DSHとの接続を確認しています。設定の再読込中は自動で復帰します。'); }
+          try { const value = await call('status'); if (!cancelled) { merge(value); setConnectionError(''); } }
+          catch { if (!cancelled) setConnectionError('DSHとの接続を確認しています。設定の再読込中は自動で復帰します。'); }
           finally { if (!cancelled) timer = setTimeout(refresh, document.hidden ? 10_000 : 2000); }
         };
         void refresh();
@@ -65,7 +66,14 @@ window.__ModuleLoader__.load({
       async function action(name, payload = {}, after) {
         if (busyRef.current) return;
         busyRef.current = true; setPending(true); setError('');
-        try { const value = await call(name, payload); if (mounted.current) { after?.(value); merge(await call('status')); } }
+        try {
+          const value = await call(name, payload);
+          if (mounted.current) {
+            after?.(value);
+            try { const status = await call('status'); if (mounted.current) { merge(status); setConnectionError(''); } }
+            catch { if (mounted.current) setConnectionError('DSHとの接続を確認しています。設定の再読込中は自動で復帰します。'); }
+          }
+        }
         catch (e) { if (mounted.current) setError(e.message || '処理に失敗しました。'); }
         finally { busyRef.current = false; if (mounted.current) setPending(false); }
       }
@@ -88,6 +96,7 @@ window.__ModuleLoader__.load({
         h('ol', { className: 'steps', 'aria-label': '接続の確認工程' }, (state?.steps || Object.keys(TITLES).map(id => ({ id, status: 'idle' }))).map((s, i) => h('li', { className: `step ${s.status}`, key: s.id, title: s.message }, h('span', { className: 'icon', 'aria-hidden': true }, s.status === 'done' ? '✓' : s.status === 'working' ? '' : s.status === 'error' ? '!' : i + 1), h('div', null, h('strong', null, TITLES[s.id]), h('small', null, STATES[s.status]))))),
         remote ? h('div', { className: 'notice' }, 'この公開接続では状態確認だけができます。Cloudflare設定の変更・停止は、元のローカルまたはSSH経由のDSH接続で行ってください。') : null,
         error ? h('div', { className: 'notice', role: 'alert' }, error) : null,
+        connectionError ? h('div', { className: 'notice', role: 'status' }, connectionError) : null,
         state?.error ? h('div', { className: 'notice', role: 'alert' }, h('strong', null, state.error.code), h('p', null, state.error.message)) : null,
         state?.pendingWrite ? h('div', { className: 'notice' }, '前回のAPI作成結果が不明です。重複作成を防ぐため停止しています。READMEの「不明な書き込みの復旧」を確認してください。') : null,
         state?.hostReview ? h('div', { className: 'notice', role: 'alert' }, h('strong', null, 'このPCで使い続けるか確認してください'),
