@@ -63,6 +63,30 @@ test('bounded uploads fail before forwarding oversized declared bodies', async t
   const result = await http(f.gate.port, { path: '/api/echo', method: 'POST', headers: { ...headers, 'content-length': '5' }, body: '12345' });
   assert.equal(result.status, 413); assert(!f.upstream.calls.some(x => x.path === '/api/echo'));
 });
+test('a slow DSH response is forwarded within the upstream header window, and a stuck one becomes 502', async t => {
+  const f = await fixture(t, { upstreamHeadersMs: 1500 }); await f.activate();
+  const slow = await http(f.gate.port, { path: '/api/slow?ms=400', headers }); assert.equal(slow.status, 200); assert.equal(slow.body, 'slow-ok');
+  const stuck = await http(f.gate.port, { path: '/api/slow?ms=4000', headers }); assert.equal(stuck.status, 502);
+  assert.equal(f.gate.server.requestTimeout, f.gate.maximumStreamMs);
+});
+test('a slow upload longer than the response-header window is not cut: the window starts after the body is sent', async t => {
+  const f = await fixture(t, { upstreamHeadersMs: 300 }); await f.activate();
+  const result = await new Promise((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port: f.gate.port, method: 'POST', path: '/api/echo', headers: { ...headers, 'content-type': 'application/octet-stream', 'transfer-encoding': 'chunked' } }, res => { const c = []; res.on('data', x => c.push(x)); res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(c).toString() })); });
+    req.on('error', reject); let n = 0;
+    const timer = setInterval(() => { req.write(`part-${n}|`); if (++n === 6) { clearInterval(timer); req.end(); } }, 150); // ~900 ms upload
+  });
+  assert.equal(result.status, 200); assert.equal(JSON.parse(result.body).received, 'part-0|part-1|part-2|part-3|part-4|part-5|');
+});
+test('default upstream window matches the Cloudflare edge origin timeout, not a short local cut-off', () => {
+  const gate = new Gate({ host: HOST, instanceId: 'i', adapter: {}, verify: null });
+  assert.equal(gate.upstreamHeadersMs, 100_000); assert.equal(gate.maximumBodyBytes, 100 * 1024 * 1024);
+});
+test('a trustedHosts edit refused by DSH is reported with a safe, actionable error', async t => {
+  const upstream = await dshFixture(); t.after(() => upstream.close());
+  upstream.ctx.get('configEditor').edit = async () => { throw new Error('Configuration for "connection" is overridden by a home patch or command-line overlay'); };
+  await assert.rejects(new DshAdapter(upstream.ctx).trust('other.example.com'), e => e.code === 'DSH_CONFIG' && /--trusted-host/.test(e.message) && !/home patch or command-line overlay/.test(e.message));
+});
 test('DSH launch-token rotation re-exchanges over loopback; trust edit retains other fields', async t => {
   const f = await fixture(t); await f.activate();
   assert.deepEqual(f.upstream.raw.recovery, { retries: 3 }); assert(f.upstream.raw.trustedHosts.includes('keep.example.com'));

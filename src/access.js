@@ -1,5 +1,6 @@
 import { demand, issuer, email } from './common.js';
 
+const CLOCK_SKEW_SECONDS = 30;
 /** JWT issuers and JWKS URLs are pinned configuration, never token-controlled URLs. */
 export async function accessVerifier({ teamDomain, audience, ownerEmail }, options = {}) {
   const expectedIssuer = issuer(teamDomain); const owner = email(ownerEmail);
@@ -8,9 +9,12 @@ export async function accessVerifier({ teamDomain, audience, ownerEmail }, optio
   const keys = options.keySet ?? createRemoteJWKSet(new URL(`${expectedIssuer}/cdn-cgi/access/certs`), { timeoutDuration: 5000, cooldownDuration: 30_000, cacheMaxAge: 10 * 60_000 });
   return async token => {
     demand(typeof token === 'string' && token.length <= 16_384, 'AUTH', 'Authentication required.');
-    const { payload } = await jwtVerify(token, keys, { issuer: expectedIssuer, audience, algorithms: ['RS256'], requiredClaims: ['exp', 'iat', 'sub', 'email', 'type'], clockTolerance: 0 });
+    // Access sets nbf = iat. Tolerate a host clock up to 30 s behind Cloudflare for nbf/iat only;
+    // expiry is enforced strictly below, so the tolerance never extends a session.
+    const { payload } = await jwtVerify(token, keys, { issuer: expectedIssuer, audience, algorithms: ['RS256'], requiredClaims: ['exp', 'iat', 'sub', 'email', 'type'], clockTolerance: CLOCK_SKEW_SECONDS });
     demand(payload.type === 'app' && typeof payload.sub === 'string' && payload.sub.length > 0 && typeof payload.email === 'string' && payload.email.toLowerCase() === owner, 'AUTH', 'Owner authentication required.');
-    demand(Number.isSafeInteger(payload.exp) && Number.isSafeInteger(payload.iat) && payload.iat <= Date.now() / 1000 + 30 && payload.exp > payload.iat, 'AUTH', 'Invalid authentication lifetime.');
+    const now = Date.now() / 1000;
+    demand(Number.isSafeInteger(payload.exp) && Number.isSafeInteger(payload.iat) && payload.iat <= now + CLOCK_SKEW_SECONDS && payload.exp > payload.iat && payload.exp > now, 'AUTH', 'Invalid authentication lifetime.');
     return { subject: payload.sub, email: owner, expiresAt: payload.exp * 1000 };
   };
 }

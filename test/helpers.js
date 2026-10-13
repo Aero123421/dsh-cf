@@ -27,6 +27,7 @@ export async function dshFixture() {
     }
     if (!trusted.has(req.headers.host) || req.headers.cookie !== cookie(req.headers.host)) { res.writeHead(401); res.end('unauthorized'); return; }
     if (url.pathname === '/api/fail') { res.writeHead(401); res.end('unauthorized'); return; }
+    if (url.pathname === '/api/slow') { await new Promise(r => setTimeout(r, Number(url.searchParams.get('ms') || 300))); if (!res.destroyed) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('slow-ok'); } return; }
     if (url.pathname === '/events') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write('data: hello\n\n'); return; }
     res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'dsh-auth-leaked=NEVER-BROWSER; HttpOnly' }); res.end(JSON.stringify({ path: req.url, received: Buffer.concat(chunks).toString() }));
   });
@@ -45,7 +46,7 @@ export async function dshFixture() {
   return { calls, trusted, port, ctx: { get: k => services[k] }, get raw() { return raw; }, get exchanges() { return exchanges; }, rotate: () => { launch = 'process-secret-two'; }, close: async () => { for (const s of sockets) s.destroy(); await new Promise(r => server.close(r)); } };
 }
 export function memoryStore() {
-  return { dir: '/unused', state: { version: 1, instanceId: '550e8400-e29b-41d4-a716-446655440000', owned: {}, pending: null, setup: null, autoConnect: false }, token: null, saves: [], async save() { this.saves.push(structuredClone(this.state)); }, async writeToken(value) { this.token = value; }, async hasToken() { return !!this.token; }, async clearToken() { this.token = null; }, async close() {} };
+  return { dir: '/unused', state: { version: 1, instanceId: '550e8400-e29b-41d4-a716-446655440000', owned: {}, pending: null, setup: null, autoConnect: false }, token: null, saves: [], closed: false, async save() { this.saves.push(structuredClone(this.state)); }, async writeToken(value) { this.token = value; }, async hasToken() { return !!this.token; }, async clearToken() { this.token = null; }, async confirmHost() { this.state.hostReview = null; await this.save(); }, async close() { this.closed = true; } };
 }
 export function fakeCloudflare() {
   const data = { writes: [], apps: [], tunnels: [], records: [], policies: new Map(), configs: new Map(), organization: { auth_domain: SETUP.teamDomain, name: 'Existing organization', mfa_config: { allowed_authenticators: ['biometrics', 'security_key'], session_duration: '8h' }, mfa_required_for_all_apps: false }, fail: null };
@@ -66,7 +67,13 @@ export function fakeCloudflare() {
     if (p.endsWith('/cfd_tunnel')) { if (method === 'POST') { const tunnel = { ...body, id: 'tunnel-1', token: 'connector-secret-'.repeat(4) }; data.tunnels.push(tunnel); return reply(tunnel); } return reply(data.tunnels); }
     if (p.endsWith('/configurations')) { const id = p.split('/').at(-2); if (method === 'PUT') data.configs.set(id, body); return reply(data.configs.get(id) || { config: {} }); }
     if (p.endsWith('/token')) return reply('connector-secret-'.repeat(4));
-    if (/\/cfd_tunnel\/[^/]+$/.test(p)) { const id = p.split('/').at(-1), item = data.tunnels.find(t => t.id === id); if (method === 'DELETE') data.tunnels = data.tunnels.filter(t => t.id !== id); return item ? reply(item) : Response.json({ success: false }, { status: 404 }); }
+    if (/\/cfd_tunnel\/[^/]+\/connections$/.test(p)) { const id = p.split('/').at(-2); if (method === 'DELETE') data.connections = { ...data.connections, [id]: 0 }; return reply(null); }
+    if (/\/cfd_tunnel\/[^/]+$/.test(p)) {
+      const id = p.split('/').at(-1), item = data.tunnels.find(t => t.id === id);
+      // Cloudflare refuses to delete a Tunnel that still has active connections.
+      if (method === 'DELETE' && item && (data.connections?.[id] ?? 1) > 0) return Response.json({ success: false }, { status: 400 });
+      if (method === 'DELETE') data.tunnels = data.tunnels.filter(t => t.id !== id); return item ? reply(item) : Response.json({ success: false }, { status: 404 });
+    }
     if (p.endsWith('/dns_records')) { if (method === 'POST') { const record = { ...body, id: 'dns-1' }; data.records.push(record); return reply(record); } return reply(data.records); }
     if (/\/dns_records\/[^/]+$/.test(p)) { const id = p.split('/').at(-1), item = data.records.find(t => t.id === id); if (method === 'DELETE') data.records = data.records.filter(t => t.id !== id); return item ? reply(item) : Response.json({ success: false }, { status: 404 }); }
     throw new Error(`Unexpected test request: ${method} ${p}`);

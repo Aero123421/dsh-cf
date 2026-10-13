@@ -10,7 +10,7 @@ const equal = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer
 /** Public-client PKCE only. Management grants live in memory, never in the status snapshot. */
 export class OAuth {
   constructor({ fetchImpl = fetch, onToken = () => {}, onState = () => {} } = {}) {
-    this.fetch = fetchImpl; this.onToken = onToken; this.onState = onState; this.pending = null; this.server = null;
+    this.fetch = fetchImpl; this.onToken = onToken; this.onState = onState; this.pending = null; this.server = null; this.grantClientId = null;
   }
   async begin({ clientId, scopes, port = 8789 }) {
     demand(typeof clientId === 'string' && /^[A-Za-z0-9_-]{8,200}$/.test(clientId), 'OAUTH_CLIENT', 'Register a public Cloudflare OAuth client or configure your own Client ID first.');
@@ -62,6 +62,8 @@ export class OAuth {
       demand(this.pending === pending, 'OAUTH_EXPIRED', 'The authorization attempt was superseded.');
       await this.onToken(body.access_token, Date.now() + body.expires_in * 1000, pending.abort.signal);
       pending.abort.signal.throwIfAborted();
+      // A public client identifies itself at the revocation endpoint (RFC 7009 §2.1).
+      this.grantClientId = pending.clientId;
       this.onState('complete'); return { connected: true };
     } finally {
       if (this.pending === pending) this.pending = null;
@@ -72,7 +74,9 @@ export class OAuth {
   }
   async revoke(token) {
     if (!token) return;
-    const response = await this.fetch(REVOKE, { method: 'POST', redirect: 'error', signal: timeout(undefined), headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token, token_type_hint: 'access_token' }) });
+    const clientId = this.grantClientId;
+    demand(typeof clientId === 'string' && clientId.length > 0, 'OAUTH_REVOKE', 'The OAuth client for this grant is unknown. The local grant can still be forgotten.');
+    const response = await this.fetch(REVOKE, { method: 'POST', redirect: 'error', signal: timeout(undefined), headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token, token_type_hint: 'access_token', client_id: clientId }) });
     demand(response.ok, 'OAUTH_REVOKE', 'Cloudflare did not confirm grant revocation. The local grant can still be forgotten.');
   }
   async cancel() {

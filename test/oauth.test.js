@@ -50,6 +50,17 @@ test('an older cancelled exchange cannot close a newer callback listener', async
   assert.equal(f.oauth.pending.redirectUri, newer.redirectUri);
   assert.equal((await http(f.port, { path: '/nonexistent', headers: { host: `127.0.0.1:${f.port}` } })).status, 404);
 });
+test('revocation identifies the public client that received the grant', async t => {
+  const f = await begin(t); await f.oauth.finish(callback(f.flow));
+  await f.oauth.revoke('management-secret-123456');
+  const revoke = f.captured.at(-1); assert.equal(revoke.url, 'https://dash.cloudflare.com/oauth2/revoke');
+  assert.equal(revoke.request.body.get('client_id'), 'public-client-12345'); assert.equal(revoke.request.body.get('token'), 'management-secret-123456');
+  assert.equal(revoke.request.body.has('client_secret'), false);
+});
+test('revocation without a known OAuth client fails locally without a network call', async () => {
+  const calls = []; const oauth = new OAuth({ fetchImpl: async (...args) => { calls.push(args); return new Response(null); } });
+  await assert.rejects(oauth.revoke('some-token-value-1234567890'), { code: 'OAUTH_REVOKE' }); assert.equal(calls.length, 0);
+});
 test('offline refresh scopes and missing author Client ID are not silently invented', async () => {
   const oauth = new OAuth();
   await assert.rejects(oauth.begin({ clientId: '', scopes: [] }), { code: 'OAUTH_CLIENT' });

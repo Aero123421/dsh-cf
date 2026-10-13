@@ -1,6 +1,6 @@
 {
   "name": "dsh-cf",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Owner-only Cloudflare Access and Tunnel integration for DeepSeek Harness.",
   "type": "module",
   "main": "src/index.js",
@@ -33,7 +33,6 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-connection"
       ],
       "platform": "web"

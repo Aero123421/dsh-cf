@@ -63,6 +63,33 @@ test('remove verifies owned IDs, deletes DNS first, and leaves shared MFA untouc
   assert.match(f.data.writes[from].p, /dns_records/); assert.equal(f.data.writes[from].method, 'DELETE');
   assert.deepEqual(f.store.state.owned, {}); assert.equal(f.store.token, null); assert.equal(JSON.stringify(f.data.organization), org);
 });
+test('owned Tunnel connections are cleaned up before the Tunnel is deleted', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000); const from = f.data.writes.length;
+  await removeOwned(f.cf, f.store);
+  const deletes = f.data.writes.slice(from).filter(w => w.method === 'DELETE').map(w => w.p.replace(/^\/accounts\/[a-f0-9]+/, '').replace(/^\/zones\/[a-f0-9]+/, ''));
+  assert.deepEqual(deletes, ['/dns_records/dns-1', '/cfd_tunnel/tunnel-1/connections', '/cfd_tunnel/tunnel-1', '/access/apps/app-1']);
+  assert.equal(f.data.tunnels.length, 0);
+});
+test('lists use the documented 50-item page size and follow total_pages', async () => {
+  const seen = []; const accounts = Array.from({ length: 73 }, (_, i) => ({ id: i.toString(16).padStart(32, '0'), name: `Account ${i}` }));
+  const fetchImpl = async url => {
+    const u = new URL(url); seen.push(u.search); const page = Number(u.searchParams.get('page')), size = Number(u.searchParams.get('per_page'));
+    if (size > 50) return Response.json({ success: false, errors: [{ code: 1001 }] }, { status: 400 });
+    return Response.json({ success: true, result: accounts.slice((page - 1) * size, page * size), result_info: { page, per_page: size, total_pages: Math.ceil(accounts.length / size) } });
+  };
+  const list = await new Cloudflare('test-management-token-123456789', fetchImpl).accounts();
+  assert.equal(list.length, 73); assert.deepEqual(seen, ['?per_page=50&page=1', '?per_page=50&page=2']);
+});
+test('lists without total_pages stop on a short page', async () => {
+  let calls = 0; const fetchImpl = async () => { calls++; return Response.json({ success: true, result: Array.from({ length: calls === 1 ? 50 : 3 }, (_, i) => ({ id: `${calls}-${i}` })) }); };
+  assert.equal((await new Cloudflare('test-management-token-123456789', fetchImpl).list('/accounts/x/access/apps')).length, 53); assert.equal(calls, 2);
+});
+test('a read that cannot reach Cloudflare is not reported as an uncertain write', async () => {
+  const cf = new Cloudflare('test-management-token-123456789', async () => { throw new TypeError('fetch failed'); });
+  await assert.rejects(cf.accounts(), e => e.code === 'CF_NETWORK' && !/write/.test(e.message));
+  await assert.rejects(cf.call('POST', '/accounts/x/cfd_tunnel', {}), e => e.code === 'CF_NETWORK' && /recorded write/.test(e.message));
+  await assert.rejects(cf.call('DELETE', '/accounts/x/cfd_tunnel/y/connections'), e => e.code === 'CF_NETWORK' && !/recorded write/.test(e.message) && /retry/.test(e.message));
+});
 test('changed DNS ownership stops deletion', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000); f.data.records[0].content = 'unrelated.example.com';
   await assert.rejects(removeOwned(f.cf, f.store), { code: 'DNS_CHANGED' }); assert.equal(f.data.tunnels.length, 1);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller } from '../src/controller.js';
+import { CfError } from '../src/common.js';
 import { SETUP, AUD, HOST, fakeCloudflare, memoryStore } from './helpers.js';
 async function fixture(t, overrides = {}) {
   const store = memoryStore(), api = fakeCloudflare(); let gate, connector;
@@ -47,6 +48,37 @@ test('auto-connect cannot be enabled until browser and real transport verificati
 });
 test('shared MFA mutation requires explicit consent', async t => {
   const f = await fixture(t); await assert.rejects(f.controller.handle('mfa/enable', { accountId: SETUP.accountId }), { code: 'CONSENT' });
+});
+test('a host identity review blocks connect, resume and auto-connect until confirmed locally', async t => {
+  const f = await fixture(t); f.store.state.hostReview = { at: '2026-10-13T00:00:00.000Z' }; f.store.state.proven = true;
+  assert.deepEqual(f.controller.snapshot().hostReview, { at: '2026-10-13T00:00:00.000Z' });
+  for (const [endpoint, payload] of [['start', SETUP], ['resume', {}], ['autoconnect', { enabled: true }]]) await assert.rejects(f.controller.handle(endpoint, payload), { code: 'HOST_REVIEW' });
+  assert.equal(f.controller.operation, null);
+  await assert.rejects(f.controller.handle('host/confirm', {}), { code: 'CONSENT' });
+  await f.controller.handle('host/confirm', { approved: true }); assert.equal(f.controller.snapshot().hostReview, null);
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise; assert.equal(f.controller.phase, 'waiting-browser');
+});
+test('setup waits for DSH to open its Web listener instead of failing at boot', async t => {
+  const f = await fixture(t); let calls = 0;
+  f.controller.adapter.facts = () => { if (++calls < 4) { const e = new CfError('DSH_PORT', 'not yet'); throw e; } return {}; };
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'waiting-browser'); assert(calls >= 4);
+});
+test('a wrong DSH bind address still fails immediately', async t => {
+  const f = await fixture(t); f.controller.adapter.facts = () => { throw new CfError('DSH_BIND', 'public bind'); };
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'error'); assert.equal(f.controller.error.code, 'DSH_BIND');
+});
+test('forgetting always clears the local grant even when remote revocation fails', async t => {
+  const f = await fixture(t); f.controller.grantType = 'oauth';
+  f.controller.oauth.revoke = async () => { throw new CfError('OAUTH_REVOKE', 'not confirmed'); };
+  await assert.rejects(f.controller.handle('forget', { revoke: true }), { code: 'OAUTH_REVOKE' });
+  assert.equal(f.controller.token, null); assert.equal(f.controller.snapshot().authorized, false);
+});
+test('dispose releases profile ownership even if stopping the runtime throws', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  f.gate.close = async () => { throw new Error('close failed'); };
+  await assert.rejects(f.controller.dispose()); assert.equal(f.store.closed, true);
 });
 test('resource deletion requires exact typed hostname confirmation', async t => {
   const f = await fixture(t); f.store.state.setup = SETUP;

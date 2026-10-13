@@ -48,7 +48,20 @@ export class Controller {
       binary: this.binary, download: this.download ?? null, evidence: { ...this.evidence },
       oauth: { clientId: this.config.oauthClientId || '', scopes: this.config.oauthScopes || [], callbackPort: this.config.oauthCallbackPort || 8789 },
       lastConfigurationCheck: s.lastConfigurationCheck ?? null,
+      hostReview: s.hostReview ?? null,
     };
+  }
+  hostConfirmed() {
+    demand(!this.store.state.hostReview, 'HOST_REVIEW', 'This profile was last used under a different host identity. Confirm in the local settings that no other DSH uses its Tunnel before connecting.');
+  }
+  /** DSH may still be opening its Web listener at boot or reloading Connection after a trust edit. */
+  async dshFacts(signal) {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      try { return this.adapter.facts(); }
+      catch (e) { if (!(e instanceof CfError) || !['DSH_PORT', 'DSH_API'].includes(e.code) || Date.now() >= deadline) throw e; }
+      await pause(250, signal);
+    }
   }
   async handle(endpoint, payload = {}) {
     demand(payload && typeof payload === 'object' && !Array.isArray(payload), 'PAYLOAD', 'Expected an object payload.');
@@ -67,16 +80,25 @@ export class Controller {
       case 'mfa/enable':
         demand(payload.approved === true, 'CONSENT', 'Review and explicitly approve the additive organization MFA change.');
         this.accountDetails = { ...await this.cf().enableMfa(payload.accountId, payload.revision), accountId: payload.accountId }; this.changed(); return this.accountDetails;
-      case 'start': return this.launch(signal => this.start(payload, signal, false));
-      case 'resume': return this.launch(signal => this.start({}, signal, true));
+      case 'start': this.hostConfirmed(); return this.launch(signal => this.start(payload, signal, false));
+      case 'resume': this.hostConfirmed(); return this.launch(signal => this.start({}, signal, true));
+      case 'host/confirm':
+        demand(payload.approved === true, 'CONSENT', 'Confirm that no other DSH uses this profile’s Tunnel.');
+        await this.store.confirmHost(); this.changed(); return {};
       case 'autoconnect':
         demand(typeof payload.enabled === 'boolean', 'PAYLOAD', 'Expected a boolean.');
         demand(!payload.enabled || this.store.state.proven === true, 'VERIFY_FIRST', 'Complete browser/API/WebSocket verification before enabling auto-connect.');
+        if (payload.enabled) this.hostConfirmed();
         this.store.state.autoConnect = payload.enabled; await this.store.save(); this.changed(); return {};
       case 'forget': {
         this.authGeneration++;
-        if (payload.revoke === true && this.grantType === 'oauth') await this.oauth.revoke(this.token);
-        await this.oauth.cancel(); this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null; this.changed(); return {};
+        let revokeError = null;
+        if (payload.revoke === true && this.grantType === 'oauth') { try { await this.oauth.revoke(this.token); } catch (e) { revokeError = e; } }
+        // The local grant is always forgotten, even when remote revocation is not confirmed.
+        await this.oauth.cancel(); this.oauth.grantClientId = null;
+        this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null; this.changed();
+        if (revokeError) throw revokeError;
+        return {};
       }
       case 'remove': {
         demand(payload.confirmHostname === this.store.state.setup?.hostname && !!payload.confirmHostname, 'CONFIRM_DELETE', 'Type this instance’s exact hostname to delete its public resources.');
@@ -105,7 +127,8 @@ export class Controller {
   async start(input, signal, resume) {
     await this.closeRuntime(); this.evidence = {}; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
     this.phase = 'configuring'; this.step('environment', 'working', 'Checking DSH and cloudflared');
-    this.adapter.facts();
+    this.hostConfirmed();
+    await this.dshFacts(signal);
     const s = this.store.state;
     const setup = resume ? s.setup : await this.cf().validateSetup(input, signal);
     demand(setup, 'SETUP', 'Complete initial setup first.');
@@ -199,5 +222,9 @@ export class Controller {
     operation?.abort.abort(new DOMException('Cancelled', 'AbortError')); await operation?.promise;
     await this.closeRuntime(); this.phase = 'stopped'; this.step('tunnel', 'idle', 'Stopped locally; Cloudflare resources are retained'); this.changed();
   }
-  async dispose() { this.disposed = true; await this.stop(); this.token = null; await this.store.close(); }
+  async dispose() {
+    this.disposed = true;
+    // Always release profile ownership, even if stopping the runtime fails, so a reload can reopen it.
+    try { await this.stop(); } finally { this.token = null; await this.store.close(); }
+  }
 }
