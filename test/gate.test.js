@@ -214,3 +214,12 @@ test('public settings may read sanitized status, but cannot mutate connector con
   assert.equal(browserFence({ url: '/dsh-cf/status', method: 'POST', headers }, HOST).pathname, '/dsh-cf/status');
   for (const path of ['/dsh-cf/start', '/dsh-cf/authorize', '/dsh-cf/remove', '/dsh%2dcf/status']) assert.throws(() => browserFence({ url: path, method: 'POST', headers }, HOST));
 });
+test('public Cloudflare gate refuses every plugin updater operation before reaching DSH', async t => {
+  const f = await fixture(t); await f.activate();
+  const before = f.upstream.calls.length;
+  for (const endpoint of ['update-status', 'update-check', 'update-install']) {
+    const result = await http(f.gate.port, { path: `/dsh-cf/${endpoint}`, method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ type: 'client-request', rpcId: 'public', method: endpoint, payload: { channel: 'prerelease' } }) });
+    assert.equal(result.status, 403);
+  }
+  assert.equal(f.upstream.calls.length, before);
+});
