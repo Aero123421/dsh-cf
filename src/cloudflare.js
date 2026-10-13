@@ -1,0 +1,183 @@
+import { CfError, demand, hostname, email, cfId, issuer, boundedJson, timeout, digest } from './common.js';
+
+const API = 'https://api.cloudflare.com/client/v4';
+const MFA = { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'], session_duration: '1h' };
+const id = value => encodeURIComponent(value);
+const exact = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+export class Cloudflare {
+  constructor(token, fetchImpl = fetch) { demand(typeof token === 'string' && token.length >= 20 && !/\s/.test(token), 'API_TOKEN', 'Enter an API token, not a Global API key.'); this.token = token; this.fetch = fetchImpl; }
+  async call(method, path, body, signal) {
+    demand(path.startsWith('/') && !path.startsWith('//'), 'API_PATH', 'Invalid Cloudflare API path.');
+    let response;
+    try { response = await this.fetch(API + path, { method, redirect: 'error', signal: timeout(signal), headers: { Authorization: `Bearer ${this.token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
+    catch (e) { if (signal?.aborted) throw e; throw new CfError('CF_NETWORK', 'Cloudflare did not return a response. A recorded write may need reconciliation before retrying.'); }
+    const data = await boundedJson(response);
+    demand(response.ok && data.success === true, `CF_${response.status}`, `Cloudflare API returned HTTP ${response.status}. Check the selected resources and token permissions.`, {});
+    return data;
+  }
+  async get(path, signal) { return (await this.call('GET', path, undefined, signal)).result; }
+  async list(path, signal) {
+    const out = [];
+    for (let page = 1; page <= 100; page++) {
+      const data = await this.call('GET', `${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`, undefined, signal);
+      demand(Array.isArray(data.result), 'CF_LIST', 'Cloudflare returned an invalid resource list.');
+      out.push(...data.result);
+      if (data.result.length < 100 || (data.result_info?.total_pages && page >= data.result_info.total_pages)) return out;
+    }
+    throw new CfError('CF_LIST', 'Resource list exceeded the bounded pagination limit.');
+  }
+  async accounts(signal) { return (await this.list('/accounts', signal)).map(a => ({ id: a.id, name: a.name })); }
+  async account(accountId, signal) {
+    cfId(accountId);
+    const [zones, organization, idps] = await Promise.all([
+      this.list(`/zones?account.id=${id(accountId)}`, signal),
+      this.get(`/accounts/${id(accountId)}/access/organizations`, signal),
+      this.list(`/accounts/${id(accountId)}/access/identity_providers`, signal),
+    ]);
+    issuer(organization.auth_domain);
+    const allowed = organization.mfa_config?.allowed_authenticators ?? [];
+    return {
+      zones: zones.filter(z => z.account?.id === accountId && z.status === 'active').map(z => ({ id: z.id, name: z.name })),
+      teamDomain: organization.auth_domain,
+      idps: idps.map(p => ({ id: p.id, name: p.name, type: p.type })),
+      mfaMissing: ['biometrics', 'security_key'].filter(x => !allowed.includes(x)),
+      organizationRevision: digest(JSON.stringify(organization)),
+    };
+  }
+  async enableMfa(accountId, revision, signal) {
+    cfId(accountId);
+    const path = `/accounts/${id(accountId)}/access/organizations`;
+    const current = await this.get(path, signal);
+    demand(digest(JSON.stringify(current)) === revision, 'ORG_CHANGED', 'Shared Access settings changed. Reload and review the change again.');
+    const next = { ...current, mfa_config: { ...current.mfa_config, allowed_authenticators: [...new Set([...(current.mfa_config?.allowed_authenticators ?? []), 'biometrics', 'security_key'])], session_duration: current.mfa_config?.session_duration ?? '1h' } };
+    // Do not change mfa_required_for_all_apps or an IdP-MFA shortcut; this is an explicit additive change.
+    await this.call('PUT', path, next, signal);
+    return this.account(accountId, signal);
+  }
+  async validateSetup(input, signal) {
+    const setup = { accountId: cfId(input.accountId), zoneId: cfId(input.zoneId), hostname: hostname(input.hostname), ownerEmail: email(input.ownerEmail), idpId: input.idpId };
+    demand(typeof setup.idpId === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(setup.idpId), 'IDP', 'Choose one existing Access identity provider.');
+    const [zone, account] = await Promise.all([this.get(`/zones/${id(setup.zoneId)}`, signal), this.account(setup.accountId, signal)]);
+    demand(zone.account?.id === setup.accountId && zone.status === 'active', 'ZONE', 'Select an active DNS zone belonging to this account.');
+    demand(setup.hostname.endsWith(`.${zone.name}`), 'ZONE', 'Use a dedicated subdomain inside the selected zone, not its apex.');
+    demand(account.idps.some(x => x.id === setup.idpId), 'IDP', 'The identity provider does not belong to this account.');
+    demand(account.mfaMissing.length === 0, 'MFA_REQUIRED', 'Enable biometrics and security keys in Access first, using the reviewed shared-settings action.');
+    setup.teamDomain = account.teamDomain; return setup;
+  }
+}
+function overlaps(domain, host) {
+  if (!domain) return false;
+  const name = String(domain).replace(/^https?:\/\//i, '').split('/')[0].toLowerCase();
+  return name === host || (name.startsWith('*.') && host.endsWith(name.slice(1)));
+}
+export async function validateAccess(cf, setup, owned, instanceId, signal) {
+  const base = `/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}`;
+  const [app, policies] = await Promise.all([cf.get(base, signal), cf.list(`${base}/policies`, signal)]);
+  demand(app.name === `dsh-cf-${instanceId}` && app.domain === setup.hostname && app.type === 'self_hosted' && /^[a-f0-9]{64}$/i.test(app.aud), 'ACCESS_CHANGED', 'The owned Access application no longer matches this instance.');
+  demand(!owned.audience || app.aud === owned.audience, 'ACCESS_CHANGED', 'The Access audience changed. Re-enrollment is required.');
+  demand(app.mfa_config?.mfa_disabled === false && exact([...(app.mfa_config.allowed_authenticators ?? [])].sort(), ['biometrics', 'security_key']), 'MFA_CHANGED', 'The application must require WebAuthn biometrics/security keys only.');
+  demand(app.allowed_idps?.length === 1 && app.allowed_idps[0] === setup.idpId, 'IDP_CHANGED', 'The Access identity-provider restriction changed.');
+  demand(policies.length === 1, 'POLICY_CHANGED', 'Unexpected Access policies. No automatic overwrite was attempted.');
+  const policy = policies[0];
+  if (policy.mfa_config) demand(policy.mfa_config.mfa_disabled === false && exact([...(policy.mfa_config.allowed_authenticators ?? [])].sort(), ['biometrics', 'security_key']), 'MFA_CHANGED', 'A policy override weakened WebAuthn. It was not overwritten.');
+  demand(policy.decision === 'allow' && policy.include?.length === 1 && policy.include[0].email?.email?.toLowerCase() === setup.ownerEmail && !(policy.require?.length) && !(policy.exclude?.length) && policy.mfa_config?.mfa_disabled !== true, 'POLICY_CHANGED', 'The Access policy is not the expected owner-only policy.');
+  demand(!app.destinations?.some(d => d.overrides?.some(o => o.behavior === 'public')), 'POLICY_CHANGED', 'Public Access bypass overrides are not supported.');
+  return app;
+}
+
+/** Durable checkpoints record our IDs; a lost POST result is never silently retried. */
+export async function provision(cf, store, setup, gatePort, signal, progress = () => {}) {
+  const s = store.state; const owned = s.owned; const marker = `dsh-cf-${s.instanceId}`;
+  demand(!s.pending, 'WRITE_UNKNOWN', 'A previous Cloudflare write has an unknown result. Inspect the pending record and Cloudflare resources before retrying; no duplicate was created.');
+  if (s.setup) demand(exact(s.setup, setup), 'SETUP_CHANGED', 'Remove this instance’s existing public configuration before changing its account, hostname, owner, or IdP.');
+  const [records, apps] = await Promise.all([
+    cf.list(`/zones/${id(setup.zoneId)}/dns_records?name=${id(setup.hostname)}`, signal),
+    cf.list(`/accounts/${id(setup.accountId)}/access/apps`, signal),
+  ]);
+  demand(records.every(r => r.id === owned.dnsId), 'DNS_CONFLICT', 'This hostname already has a DNS record not owned by this plugin. It was not changed.');
+  demand(apps.every(a => a.id === owned.appId || (!overlaps(a.domain, setup.hostname) && !a.destinations?.some(d => overlaps(d.uri, setup.hostname)))), 'ACCESS_CONFLICT', 'An existing Access application overlaps this hostname. Choose another hostname.');
+  s.setup = setup; s.gatePort = gatePort; await store.save();
+  const writeNew = async (kind, path, body, commit) => {
+    s.pending = { kind, path, marker, at: new Date().toISOString() }; await store.save();
+    let data;
+    try { data = (await cf.call('POST', path, body, signal)).result; }
+    catch (e) {
+      // Definitive validation/auth errors did not create a resource; transport/5xx errors remain uncertain.
+      if (e instanceof CfError && /^CF_4\d\d$/.test(e.code)) { s.pending = null; await store.save(); }
+      throw e;
+    }
+    await commit(data); s.pending = null; await store.save();
+  };
+  progress('access');
+  if (!owned.appId) {
+    await writeNew('access', `/accounts/${id(setup.accountId)}/access/apps`, {
+      name: marker, type: 'self_hosted', domain: setup.hostname, allowed_idps: [setup.idpId], session_duration: '1h', mfa_config: MFA,
+      policies: [{ name: `${marker}-owner`, decision: 'allow', precedence: 1, include: [{ email: { email: setup.ownerEmail } }], require: [], exclude: [] }],
+    }, async app => { demand(typeof app?.id === 'string', 'CF_CREATE', 'Cloudflare returned no Access application ID.'); owned.appId = app.id; });
+  }
+  const app = await validateAccess(cf, setup, owned, s.instanceId, signal); owned.audience = app.aud; await store.save();
+  progress('tunnel');
+  if (!owned.tunnelId) {
+    await writeNew('tunnel', `/accounts/${id(setup.accountId)}/cfd_tunnel`, { name: marker, config_src: 'cloudflare' }, async tunnel => {
+      demand(typeof tunnel?.id === 'string', 'CF_CREATE', 'Cloudflare returned no Tunnel ID.'); owned.tunnelId = tunnel.id;
+      if (tunnel.token) await store.writeToken(tunnel.token);
+    });
+  }
+  const tunnelPath = `/accounts/${id(setup.accountId)}/cfd_tunnel/${id(owned.tunnelId)}`;
+  const tunnel = await cf.get(tunnelPath, signal);
+  demand(tunnel.name === marker && !tunnel.deleted_at, 'TUNNEL_CHANGED', 'The stored Tunnel ID no longer belongs to this instance.');
+  const desired = { config: { ingress: [ { hostname: setup.hostname, service: `http://127.0.0.1:${gatePort}`, originRequest: { access: { required: true, teamName: setup.teamDomain.replace('.cloudflareaccess.com', ''), audTag: [owned.audience] } } }, { service: 'http_status:404' } ] } };
+  if (owned.ingressConfigured) {
+    const existing = await cf.get(`${tunnelPath}/configurations`, signal);
+    const rules = existing.config?.ingress;
+    demand(rules?.length === 2 && rules[0].hostname === setup.hostname && rules[0].service === desired.config.ingress[0].service && rules[0].originRequest?.access?.required === true && exact(rules[0].originRequest.access.audTag, [owned.audience]) && rules[1].service === 'http_status:404', 'TUNNEL_CHANGED', 'The owned Tunnel routing changed. It was not overwritten.');
+  } else {
+    await cf.call('PUT', `${tunnelPath}/configurations`, desired, signal); owned.ingressConfigured = true; await store.save();
+  }
+  if (!(await store.hasToken())) {
+    const token = await cf.get(`${tunnelPath}/token`, signal); await store.writeToken(typeof token === 'string' ? token : token.token);
+  }
+  progress('dns');
+  if (!owned.dnsId) {
+    await writeNew('dns', `/zones/${id(setup.zoneId)}/dns_records`, { type: 'CNAME', name: setup.hostname, content: `${owned.tunnelId}.cfargotunnel.com`, proxied: true, ttl: 1, comment: marker }, async record => {
+      demand(typeof record?.id === 'string', 'CF_CREATE', 'Cloudflare returned no DNS record ID.'); owned.dnsId = record.id;
+    });
+  } else {
+    const record = await cf.get(`/zones/${id(setup.zoneId)}/dns_records/${id(owned.dnsId)}`, signal);
+    demand(record.name === setup.hostname && record.type === 'CNAME' && record.content === `${owned.tunnelId}.cfargotunnel.com` && record.proxied === true, 'DNS_CHANGED', 'The owned DNS record changed. It was not overwritten.');
+  }
+  return { ...setup, audience: owned.audience };
+}
+export async function removeOwned(cf, store, signal) {
+  const { setup, owned, instanceId } = store.state;
+  demand(!store.state.pending, 'WRITE_UNKNOWN', 'Resolve the unknown write result before deleting resources.');
+  if (!setup) return;
+  if (owned.dnsId) {
+    const path = `/zones/${id(setup.zoneId)}/dns_records/${id(owned.dnsId)}`;
+    let record; try { record = await cf.get(path, signal); } catch (e) { if (e.code !== 'CF_404') throw e; }
+    if (record) {
+      demand(record.name === setup.hostname && record.type === 'CNAME' && record.content === `${owned.tunnelId}.cfargotunnel.com`, 'DNS_CHANGED', 'DNS ownership could not be verified; deletion stopped.');
+      await cf.call('DELETE', path, undefined, signal);
+    }
+    delete owned.dnsId; await store.save();
+  }
+  if (owned.tunnelId) {
+    const path = `/accounts/${id(setup.accountId)}/cfd_tunnel/${id(owned.tunnelId)}`;
+    let tunnel; try { tunnel = await cf.get(path, signal); } catch (e) { if (e.code !== 'CF_404') throw e; }
+    if (tunnel && !tunnel.deleted_at) {
+      demand(tunnel.name === `dsh-cf-${instanceId}`, 'TUNNEL_CHANGED', 'Tunnel ownership could not be verified; deletion stopped.');
+      await cf.call('DELETE', path, undefined, signal);
+    }
+    delete owned.tunnelId; delete owned.ingressConfigured; await store.clearToken(); await store.save();
+  }
+  if (owned.appId) {
+    const path = `/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}`;
+    let app; try { app = await cf.get(path, signal); } catch (e) { if (e.code !== 'CF_404') throw e; }
+    if (app) {
+      demand(app.name === `dsh-cf-${instanceId}` && app.domain === setup.hostname && (!owned.audience || app.aud === owned.audience), 'ACCESS_CHANGED', 'Access application ownership could not be verified; deletion stopped.');
+      await cf.call('DELETE', path, undefined, signal);
+    }
+    delete owned.appId; delete owned.audience; await store.save();
+  }
+  store.state.setup = null; store.state.autoConnect = false; await store.save();
+}
