@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
         try {
           const result = await this.connection.rpc.call('/dsh-cf', `update-${method}`, payload);
           if (!result?.ok) {
-            if (method === 'install' && result?.error?.code === 'UPDATE_BUSY' && generation === this.generation) { this.remember(null); this.publish({ ...this.view, status: 'failed', reason: 'UPDATE_BUSY' }); return; }
+            if (method === 'install' && ['UPDATE_BUSY', 'UPDATE_PROFILE'].includes(result?.error?.code) && generation === this.generation) { this.remember(null); this.publish({ ...this.view, status: 'failed', reason: result.error.code }); return; }
             throw new Error('update-rpc');
           }
           const value = result.value;

@@ -193,3 +193,9 @@ test('Reload after the first install reply is lost reconciles its scoped ID with
   const next = new Controller({ rpc: { call: async (_base, method, payload) => { requests.push({ method, payload }); return { ok: true, value: { status: payload.operationId ? 'unknown' : 'idle', operation: payload.operationId, profileKey: PROFILE_KEY, running: VERSION, channel: 'prerelease' } }; } } });
   await next.status(); assert.equal(next.operation, id); assert.equal(next.view.status, 'unknown'); assert.equal(requests.at(-1).payload.operationId, id); assert.equal(requests.filter(item => item.method === 'update-install').length, 1); next.dispose();
 });
+
+test('A rejected delayed profile install clears its unadmitted browser ID', async () => {
+  const { Controller, storage } = await clientController();
+  const client = new Controller({ rpc: { call: async (_base, method) => method === 'update-install' ? { ok: false, error: { code: 'UPDATE_PROFILE' } } : { ok: true, value: { status: 'available', profileKey: PROFILE_KEY, running: VERSION, channel: 'prerelease', candidate: { id: 'candidate', version: NEXT, notes: '', url: `https://github.com/${REPO}/releases/tag/v${NEXT}` } } } } });
+  await client.status(); await client.install(); assert.equal(client.operation, null); assert.equal(storage.size, 0); client.dispose();
+});
