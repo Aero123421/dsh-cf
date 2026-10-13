@@ -23,7 +23,83 @@ window.__ModuleLoader__.load({
       if (!url) return null;
       return h('a', { className: `button ${primary ? 'primary' : ''}`, href: url, target: '_blank', rel: 'noopener noreferrer' }, label);
     }
-    function Panel({ connection }) {
+    const UPDATE_COPY = {
+      idle: '更新は未確認です。', checking: 'リリースを確認中…', available: '更新があります。', current: '選択した更新先に新しい版はありません。',
+      'no-release': '公開リリースはありません。', 'channel-empty': '選択した更新先のリリースはありません。', incompatible: 'このリリースのDSH互換性を確認できません。',
+      unavailable: 'この構成では自動更新できません。', installing: 'プラグインをインストール中…', unknown: '結果が不明です。導入を繰り返さず、結果を確認してください。',
+      'restart-required': '導入版を使うにはDSHを再起動してください。', applied: '導入結果を確認しています。', confirmed: '実行版の反映を確認しました。', overridden: '上位の設定により更新が反映されませんでした。', failed: '更新に失敗しました。', cancelled: 'インストールは取り消されました。',
+      UPDATE_MANAGER: 'この環境では画面から更新できません。手動更新先を確認してください。', UPDATE_READ_ONLY: 'この環境では更新を書き込めません。', UPDATE_SOURCE: '現在の導入経路は手動更新が必要です。', UPDATE_COMPATIBILITY: 'DSHの対応版を確認できません。', UPDATE_FETCH: 'リリースを取得できませんでした。', UPDATE_METADATA: 'リリース情報を確認できません。', UPDATE_BUSY: '別の処理が進行中です。', UPDATE_FAILURE: '更新記録・通信・導入を確認できません。手動更新先とDSHのプラグイン設定を確認してください。',
+    };
+    const UPDATE_STATUSES = Object.keys(UPDATE_COPY).filter(key => !key.startsWith('UPDATE_'));
+    const UPDATE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    class UpdateController {
+      constructor(connection) {
+        this.connection = connection; this.view = { status: 'idle', running: '—', channel: 'prerelease' }; this.listeners = new Set(); this.generation = 0; this.busy = false; this.closed = false;
+        this.operation = null; this.channel = null; this.profileKey = null;
+      }
+      subscribe = listener => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
+      getSnapshot = () => this.view;
+      publish(view) { if (this.closed) return; this.view = view; for (const listener of this.listeners) listener(); }
+      storageKey(kind) { return `dsh.cf.update.${this.profileKey}.${kind}`; }
+      remember(id) { this.operation = id; if (!this.profileKey) return; try { id ? localStorage.setItem(this.storageKey('operation'), id) : localStorage.removeItem(this.storageKey('operation')); } catch {} }
+      async call(method, payload = {}) {
+        const generation = ++this.generation;
+        try {
+          const result = await this.connection.rpc.call('/dsh-cf', `update-${method}`, payload);
+          if (!result?.ok) {
+            if (method === 'install' && result?.error?.code === 'UPDATE_BUSY' && generation === this.generation) { this.remember(null); this.publish({ ...this.view, status: 'failed', reason: 'UPDATE_BUSY' }); return; }
+            throw new Error('update-rpc');
+          }
+          const value = result.value;
+          if (!value || !UPDATE_STATUSES.includes(value.status) || typeof value.running !== 'string' || !['stable', 'prerelease'].includes(value.channel) || (value.profileKey !== null && !/^[0-9a-f]{64}$/.test(value.profileKey || '')) || value.operation && !UPDATE_UUID.test(value.operation) || value.candidate && (typeof value.candidate.id !== 'string' || typeof value.candidate.version !== 'string' || typeof value.candidate.notes !== 'string' || !value.candidate.url?.startsWith('https://github.com/Aero123421/dsh-cf/releases/tag/v'))) throw new Error('update-wire');
+          if (generation !== this.generation) return;
+          if (value.profileKey !== this.profileKey) {
+            const changedProfile = this.profileKey !== null;
+            this.profileKey = value.profileKey; this.operation = null; this.channel = null;
+            if (this.profileKey) try { const id = localStorage.getItem(this.storageKey('operation')); if (id && UPDATE_UUID.test(id)) this.operation = id; const channel = localStorage.getItem(this.storageKey('channel')); if (['stable', 'prerelease'].includes(channel)) this.channel = channel; } catch {}
+            // Resolve identity before restoring an ID. An old profile's unknown
+            // response is discarded and the current profile is queried afresh.
+            if (this.operation || changedProfile) return await this.status();
+          }
+          if (method === 'install' && value.status === 'failed' && !value.operation) this.remember(null);
+          if (value.operation) this.remember(value.operation);
+          this.channel ??= value.channel;
+          this.publish(value.candidate && value.channel !== this.channel ? { ...value, status: 'idle', candidate: null, channel: this.channel } : { ...value, channel: this.channel });
+        } catch { if (generation === this.generation) this.publish({ ...this.view, status: method === 'install' || this.operation ? 'unknown' : 'failed', reason: 'UPDATE_FAILURE' }); }
+      }
+      status() { return this.call('status', this.operation ? { operationId: this.operation } : {}); }
+      select(channel) { this.channel = channel; try { localStorage.setItem(this.storageKey('channel'), channel); } catch {} this.publish({ ...this.view, channel, status: 'idle', candidate: null }); }
+      async check() { if (this.busy || !this.profileKey) return; this.busy = true; this.remember(null); this.publish({ ...this.view, status: 'checking' }); try { await this.call('check', { channel: this.channel ?? this.view.channel }); } finally { this.busy = false; } }
+      async install() {
+        if (this.busy || !this.profileKey || this.view.status !== 'available' || !this.view.candidate) return;
+        this.busy = true; const operationId = crypto.randomUUID(); this.remember(operationId);
+        const payload = { operationId, candidateId: this.view.candidate.id, channel: this.channel ?? this.view.channel };
+        this.publish({ ...this.view, status: 'installing', operation: operationId });
+        try { await this.call('install', payload); } finally { this.busy = false; }
+      }
+      dispose() { this.closed = true; ++this.generation; this.listeners.clear(); }
+    }
+    function UpdatePanel({ updates, remote, cloudBusy, authorized, version }) {
+      const view = React.useSyncExternalStore(updates.subscribe, updates.getSnapshot);
+      React.useEffect(() => {
+        if (remote) return;
+        void updates.status();
+        const timer = setInterval(() => { if (!updates.busy) void updates.status(); }, 2000);
+        return () => clearInterval(timer);
+      }, [updates, remote]);
+      const busy = !view.profileKey || ['checking', 'installing', 'unknown', 'restart-required'].includes(view.status);
+      return h('section', { className: 'card dcf-plugin-update' }, h('h3', null, 'プラグインの更新'),
+        h('p', null, `実行版: ${view.running === '—' ? version || '—' : view.running}${view.installed && view.installed !== view.running ? ` · 導入版: ${view.installed}` : ''}`),
+        remote ? h('p', { className: 'notice' }, 'プラグインの更新は元の管理接続から操作してください。公開Tunnelでは実行できません。') : h(React.Fragment, null,
+          select('更新先', view.channel, channel => updates.select(channel), [{ id: 'stable', name: '安定版' }, { id: 'prerelease', name: 'プレリリース（alpha等）' }], busy || cloudBusy),
+          h('p', { role: 'status' }, UPDATE_COPY[view.status], view.reason ? ` · ${UPDATE_COPY[view.reason] || UPDATE_COPY.UPDATE_FAILURE}` : ''),
+          view.checkedAt ? h('p', { className: 'hint' }, `確認日時: ${new Date(view.checkedAt).toLocaleString()}`) : null,
+          view.candidate && view.status === 'available' ? h('div', null, h('p', null, `${view.running} → ${view.candidate.version} · DSH ${view.candidate.runtime}`), h('p', { style: { whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' } }, view.candidate.notes), h('p', { className: 'hint' }, '現在のGitHub配布経路を維持し、版固定を選択したリリースのタグに変更します。')) : null,
+          h('div', { className: 'actions' }, h('button', { type: 'button', disabled: busy || cloudBusy || view.status === 'unavailable', onClick: () => void updates.check() }, '更新を確認'), view.status === 'available' ? h('button', { type: 'button', className: 'primary', disabled: cloudBusy, onClick: () => void updates.install() }, 'プラグインを更新する') : null, view.status === 'unknown' ? h('button', { type: 'button', onClick: () => void updates.status() }, '結果を確認') : null),
+          view.status === 'restart-required' && authorized ? h('p', { className: 'notice' }, 'DSH再起動後はメモリー内のCloudflare API tokenの再入力が必要です。所有するTunnel・DNS・AccessのIDは保存されたままです。') : null),
+        h('p', { className: 'hint' }, 'cloudflaredの取得・更新、TunnelやDNS/Accessの変更とは別の操作です。'), link('リリース・手動更新', 'https://github.com/Aero123421/dsh-cf/releases'));
+    }
+    function Panel({ connection, updates }) {
       const [state, setState] = React.useState(null);
       const [error, setError] = React.useState('');
       const [connectionError, setConnectionError] = React.useState('');
@@ -135,14 +211,17 @@ window.__ModuleLoader__.load({
         h('div', { className: 'actions' }, h('button', { type: 'button', disabled: pending || remote, onClick: () => action(state?.busy ? 'cancel' : 'stop') }, state?.busy ? '処理をキャンセル' : '公開接続を一時停止')),
         state?.setup ? h('details', null, h('summary', null, 'このDSHの公開設定を削除'), h('p', { className: 'hint' }, '専用DNS・Tunnel・Accessアプリだけを削除します。先に自動接続を無効にします。共有MFA設定と既存cloudflaredは残ります。'), field('削除する公開ホスト名を再入力', deleteName, setDeleteName), h('div', { className: 'actions' }, button('専用の公開設定を削除', 'remove', { confirmHostname: deleteName }, { disabled: blocked || !state.authorized || deleteName !== state.setup.hostname }))) : null,
         h('details', null, h('summary', null, '診断の詳細'), h('p', null, h('code', null, `Instance: ${state?.instanceId || '—'}`)), state?.binary ? h('p', null, h('code', null, `${state.binary.path} (${state.binary.version})`)) : null, state?.steps.map(s => h('p', { className: 'hint', key: s.id }, `${TITLES[s.id]}: ${s.message || STATES[s.status]}`))),
+        h(UpdatePanel, { updates, remote: remote || !/^(?:localhost|\[?::1\]?|127\.\d+\.\d+\.\d+)$/.test(window.location.hostname), version: state?.version, cloudBusy: state?.busy || pending, authorized: state?.authorized }),
         h('div', { className: 'footer' }, 'dsh-cf · Developer preview · Cloudflareを信頼する所有者向けの接続です。Cloudflare側のMFA解除や失効を即座に検出する保証はありません。')
       );
     }
     function apply(ctx) {
       const connection = ctx.get('connection');
-      function SettingsPanel() { return h(Panel, { connection }); }
+      const updates = new UpdateController(connection);
+      ctx.effect(() => () => updates.dispose(), 'dsh-cf: updater client');
+      function SettingsPanel() { return h(Panel, { connection, updates }); }
       ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'dsh-cf', order: 20, label: () => 'Cloudflare', locale: 'dsh-cf' }, SettingsPanel));
     }
-    return { apply, inject: ['slots', 'connection', 'locale'] };
+    return { apply, inject: ['slots', 'connection', 'locale'], UpdateController };
   },
 });

@@ -61,3 +61,9 @@ Do not add bypasses to work around a failed integration test. Leave publication 
 ## Reporting
 
 Do not publish live tokens, callback URLs, cookies, private files, or exploitable proof against deployed installations in a public issue. Prefer GitHub private vulnerability reporting if enabled; otherwise ask the maintainer for a private reporting channel without including exploit details. No formal audit or response SLA is claimed.
+
+## プラグインの更新経路
+
+更新確認・導入・結果照合はDSHの認証に加え、元のloopback接続・Host・Originを確認し、転送元headerのある要求を拒否します。公開gateは従来どおり`/dsh-cf/status`だけを読み取り用として許可し、更新操作を転送しません。
+
+候補は固定GitHub repositoryの明示したリリースタグだけです。画面から任意URLやshell文字列を受け取らず、build scriptを自動承認しません。更新記録には操作ID・版・結果だけを保存し、Cloudflare tokenやDSHの認証情報を含めません。

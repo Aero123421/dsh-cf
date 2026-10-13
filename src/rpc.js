@@ -18,6 +18,16 @@ export function endpointOf(pathname) {
   const endpoint = pathname.slice(CHANNEL.length + 1);
   return endpoint.split('/').every(s => s !== '' && s !== '.' && s !== '..' && SEGMENT.test(s)) ? endpoint : undefined;
 }
+export function isManagementRequest(req) {
+  const address = req.socket?.remoteAddress?.replace(/^::ffff:/, '');
+  const loopback = value => value === 'localhost' || value === '::1' || value === '[::1]' || /^127\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}$/.test(value || '') && value.split('.').every(part => Number(part) <= 255);
+  if (!loopback(address)) return false;
+  for (const name of ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-real-ip', 'cf-connecting-ip', 'true-client-ip']) if (req.headers[name] !== undefined) return false;
+  try {
+    if (!loopback(new URL(`http://${req.headers.host}`).hostname)) return false;
+    return req.headers.origin === undefined || loopback(new URL(req.headers.origin).hostname);
+  } catch { return false; }
+}
 function text(res, status, body) {
   if (res.headersSent || res.destroyed) return;
   res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -61,6 +71,7 @@ export function rpcRoute(connection, handle) {
       }
       let url; try { url = new URL(req.url, 'http://local.invalid'); } catch { return text(res, 404, 'not found'); }
       const endpoint = endpointOf(url.pathname);
+      if (endpoint?.startsWith('update-') && !isManagementRequest(req)) return text(res, 403, 'management connection required');
       if (req.method !== 'POST' || endpoint === undefined || url.search) return text(res, 404, 'not found');
       if (String(req.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase() !== 'application/json') return text(res, 415, 'content type must be application/json');
       let raw;

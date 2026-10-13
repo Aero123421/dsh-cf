@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm, access } from 'node:fs/promises';
+import { mkdtemp, rm, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply } from '../src/index.js';
@@ -10,8 +10,11 @@ import { listen, http } from './helpers.js';
 
 const COOKIE = 'dsh-auth-fixture=ok';
 /** Minimal DSH host: WebServer prefix routes over real loopback HTTP, and Connection's admission fence. */
-async function dshHost(t) {
+async function dshHost(t, { manager } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-cf-plugin-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const anchor = join(dir, 'runtime/package.json');
+  await mkdir(join(dir, 'runtime/node_modules/@deepseek-ai/dsh-app-boot'), { recursive: true });
+  await writeFile(anchor, '{}'); await writeFile(join(dir, 'runtime/node_modules/@deepseek-ai/dsh-app-boot/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.1-alpha.2' }));
   const routes = new Map(), disposers = [];
   const server = createServer((req, res) => {
     for (const [path, route] of routes) if (req.url === path || req.url.startsWith(`${path}/`)) return void route.handler(req, res);
@@ -26,10 +29,10 @@ async function dshHost(t) {
     authenticatedUrl: base => `${base}?token=t`,
   };
   const ctx = {
-    profileContext: { dir },
+    profileContext: { dir, installAnchor: anchor },
     effect(fn) { const dispose = fn(); disposers.push(dispose); return dispose; },
     inject(_deps, callback) { callback({ connection, webServer, effect: ctx.effect }); },
-    get: name => ({ connection, webServer })[name],
+    get: name => ({ connection, webServer, pluginManager: manager })[name],
   };
   await apply(ctx, { stateDirectory: join(dir, '.dsh-cf') });
   const dispose = async () => { for (const d of disposers.splice(0).reverse()) await d(); };
@@ -67,4 +70,40 @@ test('disposing the plugin removes its route and releases profile ownership', as
   const f = await dshHost(t); await f.dispose();
   assert(!f.routes.has('/dsh-cf'));
   await assert.rejects(access(join(f.dir, '.dsh-cf', 'owner.lock')));
+});
+test('updater routes require the original management peer, Host and Origin after DSH admission', async t => {
+  const f = await dshHost(t);
+  for (const endpoint of ['update-status', 'update-check', 'update-install']) {
+    assert.equal((await f.call(endpoint, { headers: { origin: 'https://public.example.com' } })).status, 403);
+    assert.equal((await f.call(endpoint, { headers: { 'x-forwarded-for': '127.0.0.1' } })).status, 403);
+    assert.equal((await f.call(endpoint, { headers: { 'cf-connecting-ip': '127.0.0.1' } })).status, 403);
+    assert.equal((await f.call(endpoint, { headers: { cookie: '' } })).status, 401);
+  }
+  const result = JSON.parse((await f.call('update-status')).body).result;
+  assert.equal(result.ok, true); assert.equal(result.value.status, 'unavailable'); assert.equal(result.value.reason, 'UPDATE_MANAGER'); assert.equal(result.value.dshVersion, '0.2.1-alpha.2');
+  const status = JSON.parse((await f.call('status')).body).result.value;
+  assert.equal(status.version, '0.1.0-alpha.4'); assert.equal(status.phase, 'idle');
+});
+test('actual updater RPC preserves disabled state and busy responses while cloud state stays unchanged', async t => {
+  const version = '0.1.0-alpha.5'; let complete, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const calls = [], bundle = { name: 'dsh-cf', installed: true, enabled: false, version: '0.1.0-alpha.4', source: 'github:Aero123421/dsh-cf#v0.1.0-alpha.4' };
+  const manager = { listBundles: async () => [bundle], waitForInstall: async () => null, installBundle: async (spec, options) => { calls.push({ spec, options }); entered(); return new Promise(resolve => { complete = resolve; }); } };
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async url => url.includes('/releases?') ? Response.json([{ id: 1, tag_name: 'v'+version, draft: false, prerelease: true, html_url: `https://github.com/Aero123421/dsh-cf/releases/tag/v${version}`, body: '' }]) : Response.json({ name: 'dsh-cf', version, exports: { '.': './src/index.js', './client': './src/client.js' }, dsh: { bundle: { patch: './cordis.patch.yml' } }, peerDependencies: { '@deepseek-ai/dsh': '0.2.1-alpha.2' } });
+  t.after(() => { globalThis.fetch = savedFetch; });
+  const f = await dshHost(t, { manager }), before = JSON.parse((await f.call('status')).body).result.value;
+  const check = JSON.parse((await f.call('update-check', { payload: { channel: 'prerelease' } })).body).result.value;
+  const id = (await import('node:crypto')).randomUUID();
+  const first = f.call('update-install', { payload: { candidateId: check.candidate.id, operationId: id, channel: 'prerelease' } }); await started;
+  const busy = JSON.parse((await f.call('update-install', { payload: { candidateId: check.candidate.id, operationId: (await import('node:crypto')).randomUUID(), channel: 'prerelease' } })).body).result;
+  assert.equal(busy.ok, false); assert.equal(busy.error.code, 'UPDATE_BUSY');
+  bundle.version = version; complete({ application: 'restart-required', stage: 'install', bundle: 'dsh-cf', version });
+  assert.equal(JSON.parse((await first).body).result.value.status, 'restart-required');
+  assert.equal(calls.length, 1); assert.equal(calls[0].options.enabled, false); assert.equal(calls[0].options.requestId, id);
+  const receipt = JSON.parse(await (await import('node:fs/promises')).readFile(join(f.dir, '.dsh-cf-updates', `${id}.json`), 'utf8'));
+  assert.equal(receipt.id, id); assert.equal(receipt.result.application, 'restart-required');
+  assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(join(f.dir, '.dsh-cf-updates/latest.json'), 'utf8')).id, id);
+  const after = JSON.parse((await f.call('status')).body).result.value;
+  for (const key of ['instanceId', 'setup', 'resources', 'autoConnect', 'gatePort', 'binary', 'steps']) assert.deepEqual(after[key], before[key]);
 });
