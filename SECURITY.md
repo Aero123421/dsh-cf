@@ -48,6 +48,8 @@ Plugin version `0.1.0-alpha.2` was validated on real DSH `0.2.1-alpha.2` (npm, L
 
 Version `0.1.0-alpha.3` adds local regression coverage for overlapping shutdown, authorization replacement, management-operation cancellation, rejected WebSocket cleanup, per-connection Tunnel status, and configuration readback. These local fixtures do not establish live Cloudflare compatibility; the release remains a developer preview.
 
+`@deepseek-ai/dsh` is declared as `>=0.2.1-alpha.2 <0.3.0-0`. DSH `0.2.1-alpha.2` and `0.2.1-alpha.3` both accept a peer when `semver.satisfies(runtime, range, { includePrerelease: true })` is true, so this range is intended to load on those versions and on later `0.2.x` prereleases. The live install and proxy checks above were run on `0.2.1-alpha.2` only. `0.2.1-alpha.3` was checked from the published app-boot compatibility function and the plugin-manager install contract, not by loading this plugin in that host.
+
 Still required before release:
 
 - Confirm OAuth registration accepts the intended loopback callback and granted scopes, including headless setup.

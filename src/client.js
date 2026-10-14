@@ -29,6 +29,7 @@ window.__ModuleLoader__.load({
       unavailable: 'この構成では自動更新できません。', installing: 'プラグインをインストール中…', unknown: '結果が不明です。導入を繰り返さず、結果を確認してください。',
       'restart-required': '導入版を使うにはDSHを再起動してください。', applied: '導入結果を確認しています。', confirmed: '実行版の反映を確認しました。', overridden: '上位の設定により更新が反映されませんでした。', failed: '更新に失敗しました。', cancelled: 'インストールは取り消されました。',
       UPDATE_MANAGER: 'この環境では画面から更新できません。手動更新先を確認してください。', UPDATE_READ_ONLY: 'この環境では更新を書き込めません。', UPDATE_SOURCE: '現在の導入経路は手動更新が必要です。', UPDATE_COMPATIBILITY: 'DSHの対応版を確認できません。', UPDATE_FETCH: 'リリースを取得できませんでした。', UPDATE_METADATA: 'リリース情報を確認できません。', UPDATE_BUSY: '別の処理が進行中です。', UPDATE_FAILURE: '更新記録・通信・導入を確認できません。手動更新先とDSHのプラグイン設定を確認してください。',
+      UPDATE_ALREADY_INSTALLED: '導入済みの指定をHMRが拒否しました。DSHのプラグイン設定から入れ直すか、手動で同じリリースタグを導入してください。この画面は動作中のプラグインを削除しません。', UPDATE_CANDIDATE: '候補または導入版が変わりました。更新を再確認してください。',
     };
     const UPDATE_STATUSES = Object.keys(UPDATE_COPY).filter(key => !key.startsWith('UPDATE_'));
     const UPDATE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

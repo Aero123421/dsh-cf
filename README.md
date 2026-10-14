@@ -8,7 +8,7 @@ DSHの設定画面から、専用のCloudflare Tunnel・DNS・Accessアプリを
 
 ## 導入
 
-Node.js **22.12以上**。DSH `0.2.1-alpha.2`（upstream `d743267388641bc76f17c45ce8b4c231aed1d32c`）の公開APIを基準にしています。DSHは開発プレビューのため、互換性は固定版で検証してください。
+Node.js **22.12以上**。公開APIの基準は DSH `0.2.1-alpha.2`（upstream `d743267388641bc76f17c45ce8b4c231aed1d32c`）です。`@deepseek-ai/dsh` の peer は `>=0.2.1-alpha.2 <0.3.0-0` です。DSH は起動時にこの範囲を `semver.satisfies`（`includePrerelease: true`）で見るため、`0.2.1-alpha.2`、`0.2.1-alpha.3`、それ以降の 0.2 系（プレリリースを含む）では読み込まれ、`0.3.0` とそのプレリリースでは読み込まれません。上限を `<0.3.0` にすると、同じオプションでは `0.3.0` のプレリリースまで含まれます。下限は実機で確認した `0.2.1-alpha.2` です。`0.2.0-rc.2` 以前はこのプラグインの確認対象外です。`0.2.1-alpha.3` は公開された互換判定と導入契約をソースで確認しており、この版をその DSH へ実インストールした確認はまだです。
 
 ```sh
 dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.3'
@@ -159,6 +159,9 @@ DSH_CF_CLOUDFLARED=/path/to/cloudflared npm test
 
 # オフラインの契約/通信テストだけ。リリース判定には使わない。
 DSH_CF_OFFLINE_TEST=1 npm run check
+
+# 公開中の DSH alpha が peer 範囲に入るか。npm registry と app-boot の tarball を読む。
+npm run check:dsh
 ```
 
 ### 自動テスト（0.1.0-alpha.2、Linux x64・Node 22.22）
@@ -219,7 +222,13 @@ MIT。DeepSeek/Cloudflareの公式製品ではありません。
 
 「プラグインを更新する」は、確認したリリースの明示タグをDSHのプラグイン管理へ渡します。現在のGitHub配布経路と版固定、bundleのON/OFFを維持します。ソースのJSから導入するため、Release assetやインストール時のビルドは不要です。ローカルの開発ディレクトリ・tgz・npm等から導入した場合や、画面から変更できない環境では、元の配布元から手動更新してください。
 
-更新候補のpackage名・版・JS entry・bundle宣言とDSH対応版を確認し、導入済みの版を下げません。この版の対応DSHは`0.2.1-alpha.2`です。異なる対応範囲を宣言したリリースは互換性の確認が必要なものとして扱います。
+更新候補のpackage名・版・JS entry・bundle宣言とDSH対応範囲を確認し、導入済みの版を下げません。対応範囲は完全一致の版番号、または `>=` `>` `<=` `<` `=` と比較対象を空白で結んだ条件（`||` で代替）だけを読みます。プレリリースも比較に含めます。`^` や `*` など、それ以外の書き方は導入しません。
+
+導入は確認したタグの `github:Aero123421/dsh-cf#<tag>` を DSH の `installBundle` に渡します。DSH `0.2.1-alpha.3` で HMR が有効なとき、保存済みの依存指定と文字列が一致する spec は `already-installed` で拒否され、profile は変更されません。そのときは同じタグの `git+https://github.com/Aero123421/dsh-cf.git#<tag>` で同じ導入をやり直します。保存済みの文字列と違うため、pnpm は実行されます。`0.2.1-alpha.2` では最初の `installBundle` が、入っているパッケージの上から導入します。
+
+DSH のプラグイン設定にある公式の更新は、プラグイン管理画面が `removeBundle` のあと `installBundle` します。管理画面は削除する対象とは別のプラグインなので、削除のあとも処理を続けられます。この画面から自分自身を `removeBundle` すると、HMR の再読込でこのプラグインが止まり、続く導入が実行されません。そのためここでは削除しません。両方の指定が `already-installed` のまま導入版が候補より古いときは失敗を表示し、DSH のプラグイン設定か手動の同じタグでの導入を案内します。
+
+`0.1.0-alpha.4` の更新確認は、peer を完全一致の版番号として読みます。範囲を書いたリリースは、その版の画面からは導入できません。DSH のプラグイン設定か `dsh plugin` で一度入れてください。
 
 更新はcloudflaredの取得・更新やTunnel/DNS/Accessの変更とは別の操作です。保存済みの所有IDや接続設定を作り直しません。公開Tunnelから更新操作はできず、元のローカル管理接続を使用します。再起動が必要でCloudflare API tokenを入力済みの場合は、メモリー内のtokenの再入力が必要になることを表示します。
 

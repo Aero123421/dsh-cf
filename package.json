@@ -25,6 +25,7 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "check": "node scripts/check.mjs",
+    "check:dsh": "node scripts/dsh-compat.mjs",
     "test:live": "node scripts/live-check.mjs"
   },
   "dsh": {
@@ -50,7 +51,7 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/dsh": "0.2.1-alpha.2"
+    "@deepseek-ai/dsh": ">=0.2.1-alpha.2 <0.3.0-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh": {
