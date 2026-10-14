@@ -11,3 +11,7 @@ Every UI checkmark must derive from host state or observed evidence, never a tim
 Do not create CI, deployed services, cloud resources, or paid plans as a side effect of editing the code. Live testing requires a deliberately selected test account/hostname and explicit credentials supplied for that purpose. Never overwrite unrelated resource IDs or adopt a tunnel by display name.
 
 Keep README and SECURITY honest about which actual environments and dependencies were tested. Implement only current supported contracts; do not silently weaken enforcement when an API changes.
+
+## 開発用Skills
+
+DSHプラグインの実装・レビューでは [.agents/AGENTS.md](.agents/AGENTS.md) を読み、作業に合う [.agents/skills](.agents/README.md) のSkillを使います。リポジトリ固有の方針と検証コマンドは、既存の指示・README・package.json・CIに従います。
