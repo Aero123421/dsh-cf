@@ -174,10 +174,14 @@ test('raw errors and remote response bodies are not exposed in diagnostics', () 
   assert(!JSON.stringify(safeError(new Error('Bearer SECRET'))).includes('SECRET'));
   assert.equal(safeError(new CfError('LOCAL', 'Safe failure')).code, 'LOCAL');
 });
-test('IdP MFA substitution and an unreadable organization block publication without writes', async () => {
+test('optional organization AMR fields follow the API contract while malformed and enabled values block publication', async () => {
   const { mfaAssurance } = await import('../src/cloudflare.js');
-  const base = { allowed_authenticators: ['biometrics', 'security_key'] };
-  assert.equal(mfaAssurance({ mfa_config: { ...base } }).state, 'unknown');
+  const base = { allowed_authenticators: ['biometrics', 'security_key'], session_duration: '8h' };
+  assert.equal(mfaAssurance({ mfa_config: { ...base } }).state, 'independent');
+  assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_session_duration: null } }).state, 'independent');
+  assert.equal(mfaAssurance({ mfa_config: {} }).state, 'unknown');
+  assert.equal(mfaAssurance({ mfa_config: { ...base, session_duration: 'invalid' } }).state, 'unknown');
+  assert.equal(mfaAssurance({ mfa_config: { ...base, allowed_authenticators: null } }).state, 'unknown');
   assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_enabled: false } }).state, 'independent');
   assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_enabled: true } }).state, 'substitute');
   assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_session_duration: '30m' } }).state, 'substitute');
@@ -188,7 +192,7 @@ test('IdP MFA substitution and an unreadable organization block publication with
   assert.equal(mfaAssurance({}).state, 'unknown');
   const f = make();
   delete f.data.organization.mfa_config.amr_matching_enabled;
-  await assert.rejects(f.cf.validateSetup(SETUP), { code: 'MFA_UNKNOWN' });
+  assert.deepEqual(await f.cf.validateSetup(SETUP), SETUP);
   assert.equal(f.data.writes.length, 0);
   f.data.organization.mfa_config.amr_matching_enabled = false;
   f.data.organization.mfa_config.amr_matching_session_duration = '30m';
