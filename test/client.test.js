@@ -52,6 +52,15 @@ test('a disabled connect button has one reason for each blocking condition', asy
   ];
   for (const [patch, reason] of cases) assert.equal(connectBlockers({ ...ready, ...patch }), reason, reason);
 });
+test('Access-only sign-in ignores optional WebAuthn blockers but keeps owner, authorization and busy checks', async () => {
+  const { connectBlockers } = await load();
+  for (const mfa of ['unknown', 'substitute', 'independent']) {
+    assert.equal(connectBlockers({ ...ready, requireWebAuthn: false, mfa, mfaMissing: ['biometrics'] }), null);
+  }
+  for (const [patch, reason] of [[{ authorized: false }, 'authorize'], [{ ownerEmail: '' }, 'email'], [{ remote: true }, 'remote'], [{ busy: true }, 'busy']]) {
+    assert.equal(connectBlockers({ ...ready, requireWebAuthn: false, ...patch }), reason);
+  }
+});
 test('cancel is sent while the first mutation is pending and its late result is dropped', async () => {
   const { PanelSession } = await load();
   const calls = [];
@@ -197,6 +206,27 @@ test('a public page and an in-progress authorization render their links', async 
   const open = nodes.find(node => node?.type === 'a' && node?.props?.href === 'http://127.0.0.1:8789/oauth-preview');
   assert.equal(typeof open, 'object');
   assert.equal(nodes.some(node => node?.type === 'a' && String(node?.props?.href || '').includes('code_verifier')), false);
+  const option = nodes.find(node => node?.type === 'label' && node.children?.includes(plugin.COPY.en.requireWebAuthn));
+  const checkbox = option.children.find(node => node?.type === 'input');
+  // A saved setup without a flag retains the original WebAuthn requirement.
+  assert.equal(checkbox.props.checked, true);
+  assert(nodes.some(node => node?.type === 'a' && node.props.href === status.enrollmentUrl));
+  checkbox.props.onChange({ target: { checked: false } });
+  const collect = () => { nodes.length = 0; walk(view); return nodes.filter(node => typeof node === 'string').join('\n'); };
+  const optionalText = collect();
+  assert.equal(optionalText.includes(plugin.COPY.en.mfaSubstitute), false);
+  const save = nodes.find(node => node?.type === 'button' && node.children?.includes(plugin.COPY.en.saveConnect));
+  assert.equal(save.props.disabled, false);
+  // The saved mode, not the unsaved checkbox, controls enrollment instructions.
+  assert(nodes.some(node => node?.type === 'a' && node.props.href === status.enrollmentUrl));
+  status.setup.requireWebAuthn = false; status.sequence++;
+  save.props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  const savedText = collect();
+  assert.equal(nodes.some(node => node?.type === 'a' && node.props.href === status.enrollmentUrl), false);
+  assert(savedText.includes(plugin.COPY.en.verifyAccessHint));
+
 });
 test('locale registration survives an already-registered language and exposes English by default', async () => {
   const plugin = await load();

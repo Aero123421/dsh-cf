@@ -2,7 +2,7 @@
 
 **Owner-only remote access for DeepSeek Harness through Cloudflare Tunnel and Access.**
 
-DSHの設定画面から、専用のCloudflare Tunnel・DNS・Accessアプリを作成するプラグインです。既存の`cloudflared`を再利用し、所有者のAccessログイン＋WebAuthn追加認証を通してDSHを開きます。Workerのデプロイ、ポート開放、常設の管理サーバーは不要です。
+DSHの設定画面から、専用のCloudflare Tunnel・DNS・Accessアプリを作成するプラグインです。既存の`cloudflared`を再利用し、所有者のAccessログインを通してDSHを開きます。Touch IDなどのWebAuthn追加認証は任意で選べます。Workerのデプロイ、ポート開放、常設の管理サーバーは不要です。
 
 > **0.1.0-alpha.3 / developer preview.** 停止・認証・接続管理と設定の読み戻しを修正したプレビュー版です。旧版`0.1.0-alpha.2`では、実DSH（`0.2.1-alpha.2`、Linux）へのインストールと、DSH側の連携（設定画面・設定用通信・`trustedHosts`編集・セッション交換・HTTP/API/WebSocket中継・自動再接続・異常終了時の停止）を実機で確認しています。**実CloudflareアカウントでのOAuth・API作成・Accessログイン/WebAuthn・Tunnel登録と、macOS/Windows/iPadOSの実機試験はまだです。** セキュリティ監査済み・本番運用可能とは扱わないでください。パスキー単独ログインではありません。確認内容の詳細は「検証」を参照してください。
 
@@ -30,10 +30,10 @@ dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<reviewed-commit-sha>'
 
 1. **元の信頼済み接続**（DSHの起動URL、SSH転送、既存の私設ネットワーク経由など）で設定画面を開きます。
 2. Cloudflare OAuthで認可します。配布用Client IDはまだ登録・同梱されていないため、当面は自分のOAuthクライアント、または限定権限のAPIトークンを使います。
-3. アカウント、DNSゾーン、既存のAccessログイン方法、専用ホスト名、本人のメールを選びます。ワイルドカードや空の所有者指定は受け付けません。
-4. 必要な場合だけ、組織の利用可能な認証器にbiometrics/security_keyを追加する変更を、内容確認後に許可します。既存IdP・組織の作成は自動化しません。
+3. アカウント、DNSゾーン、既存のAccessログイン方法、専用ホスト名、本人のメールを選びます。新規設定では通常のAccessログインとCookieによるセッション保持を使い、Touch ID・セキュリティキーでの追加認証は任意です。ワイルドカードや空の所有者指定は受け付けません。
+4. WebAuthn追加認証を選んだ場合だけ、必要なら組織の利用可能な認証器にbiometrics/security_keyを追加する変更を、内容確認後に許可します。既存IdP・組織の作成は自動化しません。
 5. 「保護設定を作成して接続」。既存バイナリを検出し、なければ明示許可後に専用フォルダへ取得します。DSHの公式configEditorで公開ホストを信頼リストへ追加します。
-6. 「認証器の登録画面」（Access の App Launcher、`https://<team>.cloudflareaccess.com/`）で **Account → MFA devices** から生体認証またはセキュリティキーを登録し、「本人認証してDSHを確認」を開きます。DSHを実際に開いてHTTP・API・WebSocketの通信を確認すると、最後のチェックが付きます。
+6. WebAuthn追加認証を選んだ場合は「認証器の登録画面」（Access の App Launcher、`https://<team>.cloudflareaccess.com/`）で **Account → MFA devices** から生体認証またはセキュリティキーを登録し、「本人認証してDSHを確認」を開きます。DSHを実際に開いてHTTP・API・WebSocketの通信を確認すると、最後のチェックが付きます。
 
 以後は`https://mac.example.com/`などの公開URLからアクセスします。複数の閲覧端末は同じURLです。別のDSHは別profile・Tunnel・URLで登録してください。
 
@@ -41,17 +41,29 @@ dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<reviewed-commit-sha>'
 
 設定画面の文言はDSHのlocaleに従います。このタブは英語・日本語・中国語を登録します。日本語を追加するため、ブラウザが日本語のときはDSHの言語選択に日本語が現れます。他の画面に日本語の辞書がなければ、その画面は英語へ戻ります。「保護設定を作成して接続」が押せないときは、認可・ホスト名・MFA・処理中など、その理由をボタンのそばに1文で出します。
 
-組織がアイデンティティプロバイダーのMFAで独立したWebAuthnを省略できる場合、または応答からそれが判断できない場合は公開しません。Cloudflareの組織APIではAMR期間は任意項目です。認証器一覧と有効なセッション時間がある応答で、`amr_matching_enabled`、`amr_matching_session_duration`、`amr_session_duration` がすべて省略またはnullの場合はAMR未設定として扱います。期間が設定済み（`0m`を含む）・有効フラグがtrueの場合は公開せず、不正な値やMFA設定自体が欠ける応答も拒否します。このプラグインはその共有設定をオフにしません。Tunnel tokenをCloudflareが更新したあとは、管理認可がある接続から「コネクタの資格情報を再取得して接続」で、所有するTunnelをAPIで読み、返った値がアカウントID・Tunnel ID・32バイト以上の秘密を持つconnector tokenであり、そのIDがこのインスタンスと一致するときだけファイルを置き換えます。Tunnel を作成した直後に返る token も、同じ照合が通ってから書きます。保存済みtokenでの再接続に管理認可は不要です。再取得に失敗しても、保存済みのtokenファイルは置き換えず、動いているGateとコネクタも止めません。tokenを読めても、動いているコネクタの再起動も、保存済み設定からの再開もできないときは成功にしません。
+WebAuthn追加認証を選んだ場合は、組織がアイデンティティプロバイダーのMFAで独立したWebAuthnを省略できる、または応答から判断できないときに公開しません。Cloudflareの組織APIではAMR期間は任意項目です。認証器一覧と有効なセッション時間がある応答で、`amr_matching_enabled`、`amr_matching_session_duration`、`amr_session_duration` がすべて省略またはnullの場合はAMR未設定として扱います。期間が設定済み（`0m`を含む）・有効フラグがtrueの場合は公開せず、不正な値やMFA設定自体が欠ける応答も拒否します。このプラグインはその共有設定をオフにしません。Tunnel tokenをCloudflareが更新したあとは、管理認可がある接続から「コネクタの資格情報を再取得して接続」で、所有するTunnelをAPIで読み、返った値がアカウントID・Tunnel ID・32バイト以上の秘密を持つconnector tokenであり、そのIDがこのインスタンスと一致するときだけファイルを置き換えます。Tunnel を作成した直後に返る token も、同じ照合が通ってから書きます。保存済みtokenでの再接続に管理認可は不要です。再取得に失敗しても、保存済みのtokenファイルは置き換えず、動いているGateとコネクタも止めません。tokenを読めても、動いているコネクタの再起動も、保存済み設定からの再開もできないときは成功にしません。
 
 OAuthの進行、拒否、期限切れ、交換失敗はHostが保持します。停止しても、拒否・期限切れ・交換失敗とその理由は取り消しへ置き換えません。進行中の認可だけを取り消します。状態APIには認可URL、認可コード、PKCE、管理tokenを含めません。進行中のURLは、元の管理接続からの再取得だけで戻します。処理の途中でも停止を送れます。停止中は、Hostが完了を返すまで次の変更を始めません。
 
 公開されたDSH内のCloudflare設定ページは**状態の閲覧のみ**です。作成、認可、削除、停止などは元の信頼済みDSH接続から行います。
 
+## ログインと追加認証
+
+新規の設定画面では「Touch ID・セキュリティキーでの追加認証を要求する」はオフです。選んだIdP（メールコード、Googleなど）で本人確認し、AccessのCookieでセッションを保持します。Accessアプリのセッションは1週間（168時間）です。通常モードでは、この専用アプリの追加MFAを明示的に無効にします。組織全体や別アプリのMFAは変更しません。
+
+既存アプリのセッション時間も、管理認可後に「保護設定を保存して接続」を押すと1週間へ更新し、APIで読み戻します。専用ポリシーに独自のセッション時間がある場合は勝手に書き換えず停止します。既に発行済みのCookieの期限は、その場では延長されません。新しくログインしたセッションから反映されます。
+
+チェックをオンにすると独立したWebAuthn追加認証を要求します。この場合だけ組織の認証器設定とApp Launcherでの機器登録が必要です。
+
+既存の保存設定に選択項目がない場合は、従来どおりWebAuthn必須のまま読み込みます。既存URLの認証方法は、チェックを変更して「保護設定を保存して接続」を押すと切り替わります。管理認可と既存アプリの所有権・ポリシー確認が必要です。専用アプリのMFA項目だけを更新し、DNSとTunnelは作り直しません。ポリシーに別のMFA上書きがある場合は自動変更しません。変更後は所有者・HTTP・API・WebSocketを再確認し、自動接続は再度オンにしてください。
+
+変更の応答や読み戻しが失われた場合は、結果不明の記録を残して停止します。同じ変更を自動再送しません。「不明な書き込みの復旧」に従い、専用アプリの実設定と保存設定を照合してください。
+
 ## Cloudflare側で必要なもの
 
 - Cloudflare管理下のアクティブなDNSゾーンと、その中の未使用の専用サブドメイン。
-- 初期設定済みのZero Trust/Access組織と、利用するIdP。Email PINも既存IdPとして選べますが、**それだけでなくWebAuthnを要求するアプリ**を作ります。
-- 認証器を登録するための App Launcher。Cloudflareの独立MFAでは、利用者は App Launcher の **Account → MFA devices** から認証器を登録します（直接リンク: `https://<team>.cloudflareaccess.com/AddMfaDevice`）。App Launcher にログインできるよう、Access 設定で App Launcher に本人のメールを許可するポリシーがあることを確認してください。プラグインは App Launcher の設定を変更しません。
+- 初期設定済みのZero Trust/Access組織と、利用するIdP。Email PINも既存IdPとして選べますが、通常モードではそのログインだけを使い、追加認証を選んだ場合はWebAuthnも要求します。
+- WebAuthn追加認証を使う場合は、認証器を登録するための App Launcher。Cloudflareの独立MFAでは、利用者は App Launcher の **Account → MFA devices** から認証器を登録します（直接リンク: `https://<team>.cloudflareaccess.com/AddMfaDevice`）。App Launcher にログインできるよう、Access 設定で App Launcher に本人のメールを許可するポリシーがあることを確認してください。プラグインは App Launcher の設定を変更しません。
 - 本人のメールアドレス。DSH自体は複数の一般利用者を権限分離する設計ではありません。
 - 対象アカウント/ゾーンに必要な権限を持つOAuth grantまたはAPI token。
 
@@ -104,7 +116,7 @@ OAuth Client ID / Scope IDは設定画面から今回の認可用に入力する
 
 ```text
 Browser (HTTPS)
-  → Cloudflare Access: owner-only login + independent WebAuthn MFA
+  → Cloudflare Access: owner-only login (+ optional WebAuthn MFA)
   → Named Tunnel
   → cloudflared (dedicated child; no system service changes)
   → local Access JWT gate (127.0.0.1)

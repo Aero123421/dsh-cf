@@ -6,6 +6,12 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const COPY = {
       "en": {
+        "requireWebAuthn": "Require additional Touch ID or security key verification (optional)",
+        "authHint": "Sign in with your selected Cloudflare login method. This browser stays signed in for up to one week.",
+        "verifyAccessHint": "Sign in to Cloudflare Access with the selected login method. The browser keeps the Access session in a cookie.",
+        "saveConnect": "Save protection and connect",
+        "authSavedHint": "Changes take effect only when you save and connect. Changing authentication requires a new traffic check.",
+
         "nav": "Cloudflare",
         "eyebrow": "DSH / CLOUDFLARE",
         "headline": "Your DSH, from anywhere you sign in.",
@@ -176,6 +182,12 @@ window.__ModuleLoader__.load({
         "footer": "dsh-cf · Developer preview · A connection for an owner who trusts Cloudflare. Turning MFA off or revoking a session on the Cloudflare side is not guaranteed to be detected immediately."
       },
       "ja": {
+        "requireWebAuthn": "Touch ID・セキュリティキーでの追加認証を要求する（任意）",
+        "authHint": "選んだ方法でCloudflareにログインします。ブラウザにログイン状態を最長1週間保持します。",
+        "verifyAccessHint": "選んだ方法でCloudflare Accessにログインします。認証後はCookieでログイン状態を保持します。",
+        "saveConnect": "保護設定を保存して接続",
+        "authSavedHint": "変更は「保存して接続」を押すと反映します。認証方法を変えた後は通信を再確認します。",
+
         "nav": "Cloudflare",
         "eyebrow": "DSH / CLOUDFLARE",
         "headline": "あなたのDSHを、どこからでも。",
@@ -346,6 +358,12 @@ window.__ModuleLoader__.load({
         "footer": "dsh-cf · Developer preview · Cloudflareを信頼する所有者向けの接続です。Cloudflare側のMFA解除や失効を即座に検出する保証はありません。"
       },
       "zh": {
+        "requireWebAuthn": "要求额外的 Touch ID 或安全密钥验证（可选）",
+        "authHint": "使用所选方式登录 Cloudflare。浏览器最多保持登录一周。",
+        "verifyAccessHint": "使用所选方式登录 Cloudflare Access，浏览器通过 Cookie 保持会话。",
+        "saveConnect": "保存保护设置并连接",
+        "authSavedHint": "仅在保存并连接后应用更改。更改验证方式后需重新验证流量。",
+
         "nav": "Cloudflare",
         "eyebrow": "DSH / CLOUDFLARE",
         "headline": "从你登录的任何地方打开你的 DSH。",
@@ -538,9 +556,9 @@ window.__ModuleLoader__.load({
       if (input.hostReview) return 'host';
       if (!input.authorized) return 'authorize';
       if (!input.accountId || !input.accountReady) return 'account';
-      if (input.mfa === 'substitute') return 'mfa-substitute';
-      if (input.mfa === 'unknown') return 'mfa-unknown';
-      if (input.mfaMissing?.length) return 'mfa-missing';
+      if (input.requireWebAuthn !== false && input.mfa === 'substitute') return 'mfa-substitute';
+      if (input.requireWebAuthn !== false && input.mfa === 'unknown') return 'mfa-unknown';
+      if (input.requireWebAuthn !== false && input.mfaMissing?.length) return 'mfa-missing';
       if (!input.zoneId) return 'zone';
       if (!input.idpId) return 'idp';
       if (!hostnameOk(input.hostname)) return 'hostname';
@@ -684,7 +702,7 @@ window.__ModuleLoader__.load({
       const [scopes, setScopes] = React.useState('');
       const [link, setLink] = React.useState(null);
       const [callback, setCallback] = React.useState('');
-      const [form, setForm] = React.useState({ accountId: '', zoneId: '', hostname: '', ownerEmail: '', idpId: '', cloudflaredPath: '', allowDownload: false });
+      const [form, setForm] = React.useState({ accountId: '', zoneId: '', hostname: '', ownerEmail: '', idpId: '', cloudflaredPath: '', allowDownload: false, requireWebAuthn: false });
       const [consent, setConsent] = React.useState(false);
       const [hostOk, setHostOk] = React.useState(false);
       const [deleteName, setDeleteName] = React.useState('');
@@ -703,7 +721,7 @@ window.__ModuleLoader__.load({
         if (typeof value.sequence === 'number') seen.current = value.sequence;
         if (linkRef.current && value.oauth && value.oauth.attempt < linkRef.current.attempt) value = { ...value, oauth: { ...value.oauth, phase: 'waiting', attempt: linkRef.current.attempt, expiresAt: linkRef.current.expiresAt } };
         setState(value);
-        if (!seeded.current) { seeded.current = true; if (value.setup) setForm(f => ({ ...f, ...value.setup })); setClientId(value.oauth.clientId); setScopes(value.oauth.scopes.join(' ')); }
+        if (!seeded.current) { seeded.current = true; if (value.setup) setForm(f => ({ ...f, ...value.setup, requireWebAuthn: value.setup.requireWebAuthn !== false })); setClientId(value.oauth.clientId); setScopes(value.oauth.scopes.join(' ')); }
       };
       session.current.onChange = () => { if (mounted.current) setTick(n => n + 1); };
       session.current.onStatus = value => { if (mounted.current) { merge(value); setConnectionError(''); } };
@@ -746,7 +764,7 @@ window.__ModuleLoader__.load({
       const locked = remote || pending || stopping || state?.busy;
       const account = state?.account?.accountId === form.accountId ? state.account : null;
       const ready = state?.phase === 'ready';
-      const blocker = connectBlockers({ remote, pending, busy: state?.busy, stopping, hostReview: !!state?.hostReview, authorized: !!state?.authorized, accountId: form.accountId, accountReady: !!account, mfa: account?.mfa, mfaMissing: account?.mfaMissing, zoneId: form.zoneId, idpId: form.idpId, hostname: form.hostname, ownerEmail: form.ownerEmail });
+      const blocker = connectBlockers({ remote, pending, busy: state?.busy, stopping, hostReview: !!state?.hostReview, authorized: !!state?.authorized, accountId: form.accountId, accountReady: !!account, requireWebAuthn: form.requireWebAuthn, mfa: account?.mfa, mfaMissing: account?.mfaMissing, zoneId: form.zoneId, idpId: form.idpId, hostname: form.hostname, ownerEmail: form.ownerEmail });
       const phaseLabel = PHASE_KEY[state?.phase] ? t(PHASE_KEY[state.phase]) : t('loading');
       const reach = state?.reachability?.status === 'upstream-failed' || state?.phase === 'degraded' && state?.error?.code === 'DSH_UPSTREAM' ? t('reachUpstream')
         : state?.reachability?.status === 'auth-rejected' || state?.error?.code === 'DSH_AUTH' ? t('reachAuth')
@@ -784,22 +802,25 @@ window.__ModuleLoader__.load({
             h('p', { className: 'hint' }, t('apiTokenHint')))),
         h('div', { className: 'card' }, h('h3', null, t('cardPublish')),
           select(t('accountLabel'), form.accountId, chooseAccount, state?.accounts || [], locked || !state?.authorized, t('choose')),
+          h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: form.requireWebAuthn, disabled: locked, onChange: e => change('requireWebAuthn')(e.target.checked) }), t('requireWebAuthn')),
+          h('p', { className: 'hint' }, t('authHint')),
+          state?.setup ? h('p', { className: 'hint' }, t('authSavedHint')) : null,
           form.accountId && !account ? h('div', { className: 'actions' }, button(t('loadAccount'), 'account', { accountId: form.accountId }, { disabled: locked || !state?.authorized })) : null,
-          account?.mfa === 'substitute' ? h('div', { className: 'notice', role: 'status' }, t('mfaSubstitute')) : null,
-          account?.mfa === 'unknown' ? h('div', { className: 'notice', role: 'status' }, t('mfaUnknown')) : null,
-          account && account.mfa === 'independent' && account.mfaMissing.length ? h('div', null, h('div', { className: 'notice' }, h('strong', null, t('mfaTitle')), h('p', null, t('mfaBody')), h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: consent, onChange: e => setConsent(e.target.checked) }), t('mfaConsent')), button(t('mfaEnable'), 'mfa/enable', { accountId: form.accountId, revision: account.organizationRevision, approved: true }, { disabled: locked || !consent }))) : null,
-          account && account.mfa === 'independent' && !account.mfaMissing.length ? h('p', { className: 'hint' }, t('mfaReady')) : null,
+          form.requireWebAuthn && account?.mfa === 'substitute' ? h('div', { className: 'notice', role: 'status' }, t('mfaSubstitute')) : null,
+          form.requireWebAuthn && account?.mfa === 'unknown' ? h('div', { className: 'notice', role: 'status' }, t('mfaUnknown')) : null,
+          form.requireWebAuthn && account && account.mfa === 'independent' && account.mfaMissing.length ? h('div', null, h('div', { className: 'notice' }, h('strong', null, t('mfaTitle')), h('p', null, t('mfaBody')), h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: consent, onChange: e => setConsent(e.target.checked) }), t('mfaConsent')), button(t('mfaEnable'), 'mfa/enable', { accountId: form.accountId, revision: account.organizationRevision, approved: true }, { disabled: locked || !consent }))) : null,
+          form.requireWebAuthn && account && account.mfa === 'independent' && !account.mfaMissing.length ? h('p', { className: 'hint' }, t('mfaReady')) : null,
           account ? h('div', { className: 'grid', style: { marginTop: 14 } }, select(t('zoneLabel'), form.zoneId, change('zoneId'), account.zones, locked, t('choose')), select(t('idpLabel'), form.idpId, change('idpId'), account.idps, locked, t('choose'))) : null,
           h('div', { className: 'grid', style: { marginTop: 14 } }, field(t('hostname'), form.hostname, change('hostname'), { placeholder: 'mac.example.com', disabled: locked }), field(t('ownerEmail'), form.ownerEmail, change('ownerEmail'), { type: 'email', placeholder: 'you@example.com', disabled: locked })),
           h('p', { className: 'hint' }, t('sameUrl')),
           h('details', null, h('summary', null, t('cloudflaredDetails')), field(t('cloudflaredPath'), form.cloudflaredPath, change('cloudflaredPath')), h('p', { className: 'hint' }, t('cloudflaredHint'))),
           h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: form.allowDownload, disabled: locked, onChange: e => change('allowDownload')(e.target.checked) }), t('allowDownload')),
-          h('div', { className: 'actions' }, h('button', { type: 'button', className: 'primary', disabled: blocker !== null, 'aria-describedby': blocker ? 'dcf-connect-reason' : undefined, onClick: () => void run('start', form) }, t('connect')), state?.setup ? button(t('resume'), 'resume', {}, { disabled: !!state?.hostReview }) : null, state?.setup && state?.authorized ? button(t('refreshToken'), 'token/refresh', {}, { disabled: locked || !!state?.hostReview }) : null),
+          h('div', { className: 'actions' }, h('button', { type: 'button', className: 'primary', disabled: blocker !== null, 'aria-describedby': blocker ? 'dcf-connect-reason' : undefined, onClick: () => void run('start', form) }, t(state?.setup ? 'saveConnect' : 'connect')), state?.setup ? button(t('resume'), 'resume', {}, { disabled: !!state?.hostReview }) : null, state?.setup && state?.authorized ? button(t('refreshToken'), 'token/refresh', {}, { disabled: locked || !!state?.hostReview }) : null),
           blocker ? h('p', { className: 'reason', id: 'dcf-connect-reason', role: 'status' }, t(BLOCKER_KEY[blocker])) : null,
           state?.download ? h('div', { role: 'status' }, h('p', { className: 'hint' }, 'cloudflared: ', state.download.phase), state.download.total > 0 ? h('progress', { max: state.download.total, value: state.download.received || 0, 'aria-label': t('downloadLabel') }) : null) : null),
         state?.publicUrl ? h('div', { className: 'card' }, h('h3', null, t('cardVerify')),
-          h('p', { className: 'hint' }, t('verifyHint')),
-          h('div', { className: 'actions' }, anchor(t('enroll'), state.enrollmentUrl), anchor(t('verifyLink'), state.verificationUrl, true)),
+          h('p', { className: 'hint' }, t(state.setup.requireWebAuthn === false ? 'verifyAccessHint' : 'verifyHint')),
+          h('div', { className: 'actions' }, state.setup.requireWebAuthn !== false ? anchor(t('enroll'), state.enrollmentUrl) : null, anchor(t('verifyLink'), state.verificationUrl, true)),
           h('p', null, h('span', { className: 'url' }, state.publicUrl)),
           h('div', { className: 'evidence' }, [['unauthenticatedRejected', 'evidenceRejected'], ['owner', 'evidenceOwner'], ['http', 'evidenceHttp'], ['api', 'evidenceApi'], ['websocket', 'evidenceWebsocket']].map(([key, label]) => h('span', { key }, `${state.evidence?.[key] ? '✓' : '○'} ${t(label)}`))),
           state?.lastVerifiedAt ? h('p', { className: 'hint' }, t('lastVerified', { time: new Date(state.lastVerifiedAt).toLocaleString() })) : null,

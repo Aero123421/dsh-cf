@@ -244,3 +244,25 @@ test('a connector spawn failure is terminal rather than a normal stop', async t 
   for (let i = 0; connector.process && i < 200; i++) await new Promise(r => setTimeout(r, 10));
   assert.equal(connector.process, null); assert.equal(statuses.at(-1), 'error');
 });
+
+
+test('saved authentication mode survives reopen and legacy setups do not become Access-only', async t => {
+  const { requiresWebAuthn } = await import('../src/cloudflare.js');
+  for (const value of [undefined, true, false]) {
+    const dir = await directory(t), store = await new Store(dir).open();
+    store.state.setup = { hostname: 'keep.example.com' };
+    if (value !== undefined) store.state.setup.requireWebAuthn = value;
+    await store.save(); await store.close();
+    const reopened = await new Store(dir).open();
+    assert.equal(reopened.state.setup.requireWebAuthn, value);
+    assert.equal(requiresWebAuthn(reopened.state.setup), value !== false);
+    await reopened.close();
+  }
+});
+test('corrupt authentication mode cannot silently disable WebAuthn', async t => {
+  for (const value of ['false', null, 0]) {
+    const dir = await directory(t), store = await new Store(dir).open();
+    store.state.setup = { requireWebAuthn: value }; await store.save(); await store.close();
+    await assert.rejects(new Store(dir).open(), { code: 'STATE_CORRUPT' });
+  }
+});

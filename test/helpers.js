@@ -77,7 +77,12 @@ export function fakeCloudflare() {
       if (method === 'POST') { const app = { ...body, id: 'app-1', aud: AUD }; data.apps.push(app); data.policies.set(app.id, body.policies); return reply(app); } return reply(data.apps);
     }
     if (/\/access\/apps\/[^/]+\/policies$/.test(p)) return reply(data.policies.get(p.split('/').at(-2)) || []);
-    if (/\/access\/apps\/[^/]+$/.test(p)) { const id = p.split('/').at(-1), item = data.apps.find(a => a.id === id); if (method === 'DELETE') data.apps = data.apps.filter(a => a.id !== id); return item ? reply(item) : Response.json({ success: false }, { status: 404 }); }
+    if (/\/access\/apps\/[^/]+$/.test(p)) {
+      const id = p.split('/').at(-1), item = data.apps.find(a => a.id === id);
+      if (method === 'DELETE') data.apps = data.apps.filter(a => a.id !== id);
+      if (method === 'PUT' && item) Object.assign(item, body);
+      return item ? reply(item) : Response.json({ success: false }, { status: 404 });
+    }
     if (p.endsWith('/cfd_tunnel')) { if (method === 'POST') { const tunnel = { ...body, id: TUNNEL, token }; data.tunnels.push(tunnel); return reply(tunnel); } return reply(data.tunnels); }
     if (p.endsWith('/configurations')) { const id = p.split('/').at(-2); if (method === 'PUT') data.configs.set(id, body); return reply(data.configs.get(id) || { config: {} }); }
     if (p.endsWith('/token')) return reply(token);

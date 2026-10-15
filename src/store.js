@@ -72,7 +72,8 @@ export class Store {
       }
       const s = this.state;
       demand(s.version === 1 && /^[a-f0-9-]{36}$/.test(s.instanceId) && s.owned && typeof s.owned === 'object' && typeof s.machine === 'string'
-        && (s.acceptedMachines === undefined || (Array.isArray(s.acceptedMachines) && s.acceptedMachines.every(x => typeof x === 'string'))), 'STATE_CORRUPT', 'Unrecognized state format. No automatic migration was attempted.');
+        && (s.acceptedMachines === undefined || (Array.isArray(s.acceptedMachines) && s.acceptedMachines.every(x => typeof x === 'string')))
+        && (s.setup?.requireWebAuthn === undefined || typeof s.setup.requireWebAuthn === 'boolean'), 'STATE_CORRUPT', 'Unrecognized state format. No automatic migration was attempted.');
       if (!this.acceptedHosts().includes(fingerprint())) {
         // Hostnames drift (macOS network changes, re-created containers), but a copied profile must never
         // silently run a second connector for the same Tunnel. Load, keep publication off, and require the
