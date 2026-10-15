@@ -9,7 +9,7 @@ import { Updates, compareVersions, checkedCandidate, supportsSource, dshPeerSati
 import manifest from '../package.json' with { type: 'json' };
 const PROFILE_KEY = 'a'.repeat(64);
 const RUNTIME = '0.2.1-alpha.2', REPO = 'Aero123421/dsh-cf';
-const NEXT = '0.1.0-alpha.5';
+const NEXT = '0.1.0-alpha.6';
 function release(version, id = 1) { return { id, tag_name: 'v'+version, draft: false, prerelease: version.includes('-'), html_url: `https://github.com/${REPO}/releases/tag/v${version}`, body: 'Release notes', assets: [] }; }
 const DSH_RANGE = '>=0.2.1-alpha.2 <0.3.0-0';
 function pkg(version = NEXT, peer = RUNTIME) {
@@ -105,7 +105,7 @@ test('Pending result is protected across Clients and newer candidates; null reco
   const { updates, manager, dir } = await fixture(t, { fetcher, manager: { installBundle: async () => { installs++; throw Error('lost'); } } });
   const checked = await updates.check('prerelease'), id = randomUUID();
   assert.equal((await updates.install(checked.candidate.id, id, 'prerelease', updates.profileKey)).status, 'unknown');
-  version = '0.1.0-alpha.6';
+  version = '0.1.0-alpha.7';
   const next = new Updates({ manager: () => manager, profileDir: dir, runtime: RUNTIME, fetcher });
   assert.equal((await next.status(id)).status, 'unknown');
   assert.equal((await next.install(checked.candidate.id, randomUUID(), 'prerelease', next.profileKey)).status, 'unknown');
@@ -145,7 +145,7 @@ test('Old Host settlement cannot replace a newer operation pointer', async t => 
   const { updates, dir } = await fixture(t), first = randomUUID(), second = randomUUID();
   updates.operation = { id: first, version: NEXT, channel: 'prerelease', phase: 'installing' }; await updates.save(true);
   const replacement = new Updates({ manager: updates.manager, profileDir: dir, runtime: RUNTIME });
-  replacement.operation = { id: second, version: '0.1.0-alpha.6', channel: 'prerelease', phase: 'installing' }; await replacement.save(true);
+  replacement.operation = { id: second, version: '0.1.0-alpha.7', channel: 'prerelease', phase: 'installing' }; await replacement.save(true);
   updates.operation.result = { application: 'failed', stage: 'install' }; updates.operation.phase = 'failed'; await updates.save();
   assert.equal(JSON.parse(await readFile(join(dir, '.dsh-cf-updates/latest.json'), 'utf8')).id, second);
   assert.equal((await replacement.status(second)).operation, second);
