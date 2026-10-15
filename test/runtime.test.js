@@ -5,14 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Store } from '../src/store.js';
+import { connectorToken, tokenSecret } from './helpers.js';
 import { ensureBinary, childEnv, supportedVersion, connectorArgs, Connector, CLOUDFLARED_VERSION, MINIMUM_VERSION } from '../src/connector.js';
 async function directory(t) { const dir = await mkdtemp(join(tmpdir(), 'dsh-cf-test-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; }
 test('state is private, persists without credentials, and active profile locks are exclusive', async t => {
   const dir = await directory(t); const store = await new Store(dir).open(); t.after(() => store.close());
   await assert.rejects(new Store(dir).open(), { code: 'LOCK' });
-  store.state.gatePort = 4321; await store.save(); await store.writeToken('connector-private-'.repeat(4));
+  const token = connectorToken({ secret: tokenSecret('connector-private-secret') });
+  store.state.gatePort = 4321; await store.save(); await store.writeToken(token);
   if (process.platform !== 'win32') { assert.equal((await stat(join(dir, 'tunnel.token'))).mode & 0o777, 0o600); assert.equal((await stat(dir)).mode & 0o777, 0o700); }
-  assert(!(await readFile(join(dir, 'state.json'), 'utf8')).includes('connector-private'));
+  const state = await readFile(join(dir, 'state.json'), 'utf8');
+  assert(!state.includes(token)); assert(!state.includes('connector-private'));
   const id = store.state.instanceId; await store.close(); const reopened = await new Store(dir).open(); t.after(() => reopened.close());
   assert.equal(reopened.state.instanceId, id); assert.equal(reopened.state.gatePort, 4321);
 });
@@ -74,7 +77,7 @@ test('ownership loss stops lease renewal and refuses persistent state/token writ
   assert.equal(lost, 1); assert.equal(store.ownershipLost, true); assert.equal((await stat(path)).mtimeMs, mtime);
   const original = await readFile(join(dir, 'state.json'), 'utf8'); store.state.gatePort = 9876;
   await assert.rejects(store.save(), { code: 'LOCK' });
-  await assert.rejects(store.writeToken('new-token-must-not-be-written'), { code: 'LOCK' });
+  await assert.rejects(store.writeToken(connectorToken({ secret: tokenSecret('must-not-land') })), { code: 'LOCK' });
   await assert.rejects(store.clearToken(), { code: 'LOCK' });
   assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), original);
   await store.close(); assert.equal(JSON.parse(await readFile(path, 'utf8')).nonce, 'new-owner');
@@ -88,13 +91,13 @@ test('changing lock identity during reclamation preserves the replacement owner'
 });
 for (const kind of ['state', 'token']) test(`ownership loss while staging a ${kind} write prevents its commit`, async t => {
   const dir = await directory(t), store = await new Store(dir).open(); t.after(() => store.close());
-  await store.writeToken('original-private-token-123456789');
+  await store.writeToken(connectorToken({ secret: tokenSecret('original-private') }));
   const path = join(dir, kind === 'state' ? 'state.json' : 'tunnel.token'); const original = await readFile(path, 'utf8');
   const handle = await open(path, 'r'), prototype = Object.getPrototypeOf(handle), sync = prototype.sync; await handle.close();
   let entered, release; const staging = new Promise(r => { entered = r; }), waiting = new Promise(r => { release = r; }); t.after(() => release());
   t.mock.method(prototype, 'sync', async function () { entered(); await waiting; return sync.call(this); });
   store.state.gatePort = 5678;
-  const writing = kind === 'state' ? store.save() : store.writeToken('replacement-old-owner-token-123456');
+  const writing = kind === 'state' ? store.save() : store.writeToken(connectorToken({ secret: tokenSecret('replacement-old-owner') }));
   const rejected = assert.rejects(writing, { code: 'LOCK' });
   await staging;
   await rm(join(dir, 'owner.lock')); await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: process.pid, nonce: 'replacement-owner', heartbeatMs: 50 }));

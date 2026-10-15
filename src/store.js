@@ -4,6 +4,33 @@ import { hostname as machineName, homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { CfError, demand, digest, nonce, pause } from './common.js';
 
+const ACCOUNT_ID = /^[a-f0-9]{32}$/;
+const TUNNEL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SECRET_BYTES = 32;
+function decodeBase64(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 === 1) return null;
+  const padded = normalized.length % 4 === 0 ? normalized : normalized + '='.repeat(4 - (normalized.length % 4));
+  const bytes = Buffer.from(padded, 'base64');
+  if (!bytes.length || bytes.toString('base64').replace(/=+$/, '') !== padded.replace(/=+$/, '')) return null;
+  return bytes;
+}
+/** Cloudflare connector token: base64 JSON `{a, t, s}` for one account, one tunnel, and a secret of at least 32 bytes. The original string is what gets stored. */
+export function parseConnectorToken(token) {
+  if (typeof token !== 'string' || /[\s\r\n]/.test(token)) return null;
+  const bytes = decodeBase64(token);
+  if (!bytes) return null;
+  let value;
+  try { value = JSON.parse(bytes.toString('utf8')); }
+  catch { return null; }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (Object.keys(value).some(key => key !== 'a' && key !== 't' && key !== 's')) return null;
+  if (typeof value.a !== 'string' || !ACCOUNT_ID.test(value.a)) return null;
+  if (typeof value.t !== 'string' || !TUNNEL_ID.test(value.t)) return null;
+  const secret = typeof value.s === 'string' ? decodeBase64(value.s) : null;
+  if (!secret || secret.length < SECRET_BYTES) return null;
+  return { accountId: value.a, tunnelId: value.t.toLowerCase() };
+}
 export async function privateWrite(path, bytes, beforeCommit = () => {}) {
   const temp = `${path}.${nonce()}.tmp`;
   const handle = await open(temp, 'wx', 0o600);
@@ -127,7 +154,7 @@ export class Store {
     this.queue = write.catch(() => {}); return write;
   }
   async writeToken(token) {
-    demand(typeof token === 'string' && token.length > 20 && !/[\s\r\n]/.test(token), 'TOKEN', 'Cloudflare returned an invalid connector token.');
+    demand(parseConnectorToken(token), 'TOKEN', 'Cloudflare returned an invalid connector token.');
     await this.assertOwnership();
     await privateWrite(join(this.dir, 'tunnel.token'), token, () => this.assertOwnership());
   }

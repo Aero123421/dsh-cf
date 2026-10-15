@@ -94,3 +94,50 @@ test('offline refresh scopes and missing author Client ID are not silently inven
   await assert.rejects(oauth.begin({ clientId: '', scopes: [] }), { code: 'OAUTH_CLIENT' });
   await assert.rejects(oauth.begin({ clientId: 'public-client-12345', scopes: ['offline_access'] }), { code: 'OAUTH_SCOPES' });
 });
+test('denial and exchange failure publish a terminal phase and drop the attempt', async t => {
+  const states = [];
+  const denied = await begin(t, { onState: (status, meta) => states.push({ status, failure: meta.failure }) });
+  const state = new URL(denied.flow.authorizationUrl).searchParams.get('state');
+  await assert.rejects(denied.oauth.finish(`${denied.flow.redirectUri}?error=access_denied&state=${state}`), { code: 'OAUTH_DENIED' });
+  assert.equal(states.at(-1).status, 'denied');
+  assert.equal(states.at(-1).failure, 'OAUTH_DENIED');
+  assert.equal(denied.oauth.pending, null);
+  const failed = await begin(t, { fetchImpl: async () => new Response('no', { status: 400 }), onState: (status, meta) => states.push({ status, failure: meta.failure }) });
+  await assert.rejects(failed.oauth.finish(callback(failed.flow)), { code: 'OAUTH_EXCHANGE' });
+  assert.equal(states.at(-1).status, 'error');
+  assert.equal(states.at(-1).failure, 'OAUTH_EXCHANGE');
+  assert.equal(failed.oauth.pending, null);
+});
+test('the attempt timer publishes expired once', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const states = [];
+  const oauth = new OAuth({ onState: status => states.push(status) });
+  t.after(() => oauth.cancel());
+  const port = await freePort();
+  await oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+  assert.equal(states.at(-1), 'waiting');
+  t.mock.timers.tick(5 * 60_000);
+  for (let i = 0; states.at(-1) !== 'expired' && i < 50; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(states.at(-1), 'expired');
+  assert.equal(oauth.pending, null);
+});
+test('a late exchange failure does not overwrite a newer attempt', async t => {
+  let rejectFetch;
+  const states = [];
+  const oauth = new OAuth({
+    onState: (status, meta) => states.push({ status, attempt: meta.attempt }),
+    fetchImpl: () => new Promise((_resolve, reject) => { rejectFetch = reject; }),
+  });
+  t.after(() => oauth.cancel());
+  const port = await freePort();
+  const old = await oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+  const finishing = oauth.finish(callback(old));
+  await oauth.cancel();
+  const newer = await oauth.begin({ clientId: 'public-client-12345', scopes: ['registered.scope'], port });
+  rejectFetch(Object.assign(new Error('late'), { code: 'OAUTH_EXCHANGE' }));
+  await assert.rejects(finishing);
+  assert.equal(states.filter(item => item.status === 'error').length, 0);
+  assert.equal(oauth.pending.attempt, newer.attempt);
+  assert.equal(states.at(-1).status, 'waiting');
+  assert.equal(states.at(-1).attempt, newer.attempt);
+});

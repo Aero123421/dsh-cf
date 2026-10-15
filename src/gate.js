@@ -60,8 +60,8 @@ function cleanHeaders(headers, { host, cookie, upgrade = false, response = false
 export class Gate {
   // Defaults follow the Cloudflare edge: 100 MB request bodies on Free/Pro plans and a 100 s wait for
   // origin response headers (HTTP 524). Streams are re-authenticated at JWT expiry or after 15 minutes.
-  constructor({ host, instanceId, adapter, verify, onEvidence = () => {}, maximumBodyBytes = 100 * 1024 * 1024, maximumStreamMs = 15 * 60_000, upstreamHeadersMs = 100_000 }) {
-    this.host = host; this.instanceId = instanceId; this.adapter = adapter; this.verify = verify; this.onEvidence = onEvidence;
+  constructor({ host, instanceId, adapter, verify, onEvidence = () => {}, onFault = () => {}, maximumBodyBytes = 100 * 1024 * 1024, maximumStreamMs = 15 * 60_000, upstreamHeadersMs = 100_000 }) {
+    this.host = host; this.instanceId = instanceId; this.adapter = adapter; this.verify = verify; this.onEvidence = onEvidence; this.onFault = onFault;
     this.maximumBodyBytes = maximumBodyBytes; this.maximumStreamMs = maximumStreamMs; this.upstreamHeadersMs = upstreamHeadersMs;
     this.proofNonce = nonce(); this.enabled = false; this.closing = false; this.active = new Set(); this.sockets = new Set(); this.requests = 0;
   }
@@ -127,8 +127,11 @@ export class Gate {
       res.once('close', () => { clearTimeout(lifetime); clearTimeout(handshake); this.active.delete(stop); upstream.destroy(); });
       upstream.once('response', response => {
         clearTimeout(handshake);
+        const channel = url.pathname.startsWith('/api/') ? 'api' : 'http';
         if (response.statusCode === 401) this.adapter.invalidate(); // Never replay a possibly executed POST.
-        if (response.statusCode >= 200 && response.statusCode < 300) {
+        if (response.statusCode === 401) this.reportFault({ status: 'auth-rejected', channel });
+        else if (response.statusCode >= 500) this.reportFault({ status: 'upstream-failed', channel, httpStatus: response.statusCode });
+        else if (response.statusCode >= 200 && response.statusCode < 300) {
           if (url.pathname === '/') this.onEvidence('http');
           if (url.pathname.startsWith('/api/')) this.onEvidence('api');
         }
@@ -137,7 +140,11 @@ export class Gate {
         res.writeHead(response.statusCode, headers); response.pipe(res);
         response.once('error', () => res.destroy());
       });
-      upstream.once('error', () => { if (!res.headersSent) denied(res, 502, 'DSH upstream is unavailable.', this.instanceId); else res.destroy(); });
+      upstream.once('error', () => {
+        // A client abort or our own close is silence, not an upstream outage. Denials we write ourselves never reach here.
+        if (!this.closing && !req.aborted && !res.destroyed) this.reportFault({ status: 'upstream-failed', channel: url.pathname.startsWith('/api/') ? 'api' : 'http' });
+        if (!res.headersSent) denied(res, 502, 'DSH upstream is unavailable.', this.instanceId); else res.destroy();
+      });
       let bytes = 0;
       const limit = new Transform({ transform: (chunk, _encoding, done) => { bytes += chunk.length; done(bytes > this.maximumBodyBytes ? new Error('Body limit') : null, chunk); } });
       limit.once('error', () => { if (!res.headersSent) denied(res, 413, 'Upload exceeds the request limit.', this.instanceId); upstream.destroy(); });
@@ -168,12 +175,13 @@ export class Gate {
       demand(identity.expiresAt > Date.now(), 'AUTH', 'Authentication expired during session exchange.');
       const transport = target.protocol === 'https:' ? httpsRequest : httpRequest;
       const request = transport({ ...target, method: 'GET', path: `${url.pathname}${url.search}`, headers: cleanHeaders(req.headers, { host: this.host, cookie, upgrade: true }) });
-      let remote;
-      const stop = () => { socket.destroy(); remote?.destroy(); request.destroy(); };
+      let remote, reported = false, intentional = null;
+      const report = (status, extra) => { if (reported || this.closing) return; reported = true; this.reportFault({ status, channel: 'websocket', ...extra }); };
+      const stop = kind => { if (kind) intentional = kind; socket.destroy(); remote?.destroy(); request.destroy(); };
       this.active.add(stop);
-      const timer = setTimeout(stop, Math.max(1, Math.min(identity.expiresAt - Date.now(), this.maximumStreamMs))); timer.unref();
-      const handshake = setTimeout(stop, 15_000); handshake.unref();
-      socket.once('close', () => { clearTimeout(timer); clearTimeout(handshake); this.active.delete(stop); remote?.destroy(); request.destroy(); });
+      const timer = setTimeout(() => stop('websocket-closed'), Math.max(1, Math.min(identity.expiresAt - Date.now(), this.maximumStreamMs))); timer.unref();
+      const handshake = setTimeout(() => stop('upstream-failed'), 15_000); handshake.unref();
+      socket.once('close', () => { clearTimeout(timer); clearTimeout(handshake); this.active.delete(stop); report(intentional || 'websocket-closed'); remote?.destroy(); request.destroy(); });
       request.once('upgrade', (response, upstream, upstreamHead) => {
         clearTimeout(handshake); remote = upstream;
         if (this.closing || socket.destroyed) return stop();
@@ -182,14 +190,22 @@ export class Gate {
         for (const [key, value] of Object.entries(headers)) for (const v of Array.isArray(value) ? value : [value]) lines.push(`${key}: ${v}`);
         socket.write(lines.join('\r\n') + '\r\n\r\n');
         if (upstreamHead.length) socket.write(upstreamHead); if (head.length) upstream.write(head);
-        upstream.on('error', stop); upstream.once('close', () => socket.destroy());
+        upstream.on('error', () => { report(intentional || 'upstream-failed'); stop(); });
+        upstream.once('close', () => { report(intentional || 'websocket-closed'); socket.destroy(); });
         socket.pipe(upstream).pipe(socket); this.onEvidence('websocket');
       });
-      request.once('response', response => { if (response.statusCode === 401) this.adapter.invalidate(); response.resume(); stop(); });
-      request.once('error', stop); request.end();
+      request.once('response', response => {
+        if (response.statusCode === 401) { this.adapter.invalidate(); report('auth-rejected'); }
+        else if (response.statusCode >= 500) report('upstream-failed', { httpStatus: response.statusCode });
+        else report(intentional || 'upstream-failed');
+        if (!socket.destroyed) socket.write(`HTTP/1.1 ${response.statusCode} ${response.statusMessage || 'Error'}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+        response.resume(); stop();
+      });
+      request.once('error', () => { if (!socket.destroyed || intentional) report(intentional || 'upstream-failed'); stop(); }); request.end();
     } catch { socket.destroy(); }
     finally { admitted(); }
   }
+  reportFault(event) { if (!this.closing) this.onFault(event); }
   async close() {
     this.closing = true; this.enabled = false;
     for (const stop of this.active) stop();

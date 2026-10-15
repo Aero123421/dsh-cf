@@ -3,6 +3,17 @@ import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 export const HOST = 'dsh.example.com';
 export const ACCOUNT = 'a'.repeat(32), ZONE = 'b'.repeat(32), AUD = 'c'.repeat(64);
+export const TUNNEL = '11111111-1111-4111-8111-111111111111';
+/** Base64 JSON `{a, t, s}` in the shape cloudflared accepts. Tests keep this string exactly; the store does not re-encode it. */
+/** Pad a short fixture secret to the 32-byte minimum stored by `writeToken`. */
+export function tokenSecret(seed) {
+  const raw = Buffer.from(seed);
+  return raw.length >= 32 ? raw : Buffer.concat([raw, Buffer.alloc(32 - raw.length, 0x3c)]);
+}
+export function connectorToken({ accountId = ACCOUNT, tunnelId = TUNNEL, secret = Buffer.from('0123456789abcdef0123456789abcdef') } = {}) {
+  const bytes = Buffer.isBuffer(secret) ? secret : Buffer.from(String(secret));
+  return Buffer.from(JSON.stringify({ a: accountId, t: tunnelId, s: bytes.toString('base64') })).toString('base64');
+}
 export const SETUP = { accountId: ACCOUNT, zoneId: ZONE, hostname: HOST, ownerEmail: 'owner@example.com', idpId: 'provider-1', teamDomain: 'team.cloudflareaccess.com' };
 export const reply = result => Response.json({ success: true, result, result_info: { total_pages: 1 } });
 export async function listen(server, host = '127.0.0.1') { server.listen(0, host); await once(server, 'listening'); return server.address().port; }
@@ -27,6 +38,7 @@ export async function dshFixture({ host = '127.0.0.1' } = {}) {
     }
     if (!trusted.has(req.headers.host) || req.headers.cookie !== cookie(req.headers.host)) { res.writeHead(401); res.end('unauthorized'); return; }
     if (url.pathname === '/api/fail') { res.writeHead(401); res.end('unauthorized'); return; }
+    if (url.pathname === '/api/down' || url.pathname === '/down') { res.writeHead(503); res.end('unavailable'); return; }
     if (url.pathname === '/api/slow') { await new Promise(r => setTimeout(r, Number(url.searchParams.get('ms') || 300))); if (!res.destroyed) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('slow-ok'); } return; }
     if (url.pathname === '/events') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write('data: hello\n\n'); return; }
     res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'dsh-auth-leaked=NEVER-BROWSER; HttpOnly' }); res.end(JSON.stringify({ path: req.url, received: Buffer.concat(chunks).toString() }));
@@ -35,6 +47,7 @@ export async function dshFixture({ host = '127.0.0.1' } = {}) {
   server.on('upgrade', (req, socket, head) => {
     calls.push({ path: req.url, headers: req.headers, upgrade: true });
     if (!trusted.has(req.headers.host) || req.headers.cookie !== cookie(req.headers.host)) return socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    if (new URL(req.url, 'http://fixture.invalid').pathname === '/api/down') return socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 11\r\n\r\nunavailable');
     const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     if (head.length) socket.write(head); socket.on('data', c => socket.write(c)); socket.on('error', () => {});
@@ -49,7 +62,8 @@ export function memoryStore() {
   return { dir: '/unused', state: { version: 1, instanceId: '550e8400-e29b-41d4-a716-446655440000', owned: {}, pending: null, setup: null, autoConnect: false }, token: null, saves: [], closed: false, async save() { this.saves.push(structuredClone(this.state)); }, async writeToken(value) { this.token = value; }, async hasToken() { return !!this.token; }, async clearToken() { this.token = null; }, async confirmHost() { this.state.hostReview = null; await this.save(); }, async close() { this.closed = true; } };
 }
 export function fakeCloudflare() {
-  const data = { writes: [], apps: [], tunnels: [], records: [], policies: new Map(), configs: new Map(), organization: { auth_domain: SETUP.teamDomain, name: 'Existing organization', mfa_config: { allowed_authenticators: ['biometrics', 'security_key'], session_duration: '8h' }, mfa_required_for_all_apps: false }, fail: null };
+  const token = connectorToken();
+  const data = { writes: [], apps: [], tunnels: [], records: [], policies: new Map(), configs: new Map(), organization: { auth_domain: SETUP.teamDomain, name: 'Existing organization', mfa_config: { allowed_authenticators: ['biometrics', 'security_key'], session_duration: '8h', amr_matching_enabled: false }, mfa_required_for_all_apps: false }, fail: null };
   const fetchImpl = async (url, options = {}) => {
     const u = new URL(url); const p = u.pathname.replace('/client/v4', ''), method = options.method || 'GET'; const body = options.body ? JSON.parse(options.body) : undefined;
     if (method !== 'GET') data.writes.push({ p, method, body });
@@ -64,9 +78,9 @@ export function fakeCloudflare() {
     }
     if (/\/access\/apps\/[^/]+\/policies$/.test(p)) return reply(data.policies.get(p.split('/').at(-2)) || []);
     if (/\/access\/apps\/[^/]+$/.test(p)) { const id = p.split('/').at(-1), item = data.apps.find(a => a.id === id); if (method === 'DELETE') data.apps = data.apps.filter(a => a.id !== id); return item ? reply(item) : Response.json({ success: false }, { status: 404 }); }
-    if (p.endsWith('/cfd_tunnel')) { if (method === 'POST') { const tunnel = { ...body, id: 'tunnel-1', token: 'connector-secret-'.repeat(4) }; data.tunnels.push(tunnel); return reply(tunnel); } return reply(data.tunnels); }
+    if (p.endsWith('/cfd_tunnel')) { if (method === 'POST') { const tunnel = { ...body, id: TUNNEL, token }; data.tunnels.push(tunnel); return reply(tunnel); } return reply(data.tunnels); }
     if (p.endsWith('/configurations')) { const id = p.split('/').at(-2); if (method === 'PUT') data.configs.set(id, body); return reply(data.configs.get(id) || { config: {} }); }
-    if (p.endsWith('/token')) return reply('connector-secret-'.repeat(4));
+    if (p.endsWith('/token')) return reply(token);
     if (/\/cfd_tunnel\/[^/]+\/connections$/.test(p)) { const id = p.split('/').at(-2); if (method === 'DELETE') data.connections = { ...data.connections, [id]: 0 }; return reply(null); }
     if (/\/cfd_tunnel\/[^/]+$/.test(p)) {
       const id = p.split('/').at(-1), item = data.tunnels.find(t => t.id === id);

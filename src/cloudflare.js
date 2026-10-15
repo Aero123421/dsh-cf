@@ -1,8 +1,41 @@
 import { CfError, demand, hostname, email, cfId, issuer, boundedJson, timeout, digest } from './common.js';
+import { parseConnectorToken } from './store.js';
 
 const API = 'https://api.cloudflare.com/client/v4';
 const PER_PAGE = 50;
 const MFA = { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'], session_duration: '1h' };
+const DURATION = /^(?:0|[1-9]\d*)[mh]$/;
+/**
+ * Whether this organization still forces an independent WebAuthn prompt.
+ * The API field is `amr_matching_session_duration`. The Access guide also returns
+ * `amr_matching_enabled` and `amr_session_duration`. Any one of those means IdP MFA
+ * can skip the independent prompt. If all three are absent, the response does not
+ * show whether that shortcut is on, so publication stops. An explicit
+ * `amr_matching_enabled: false` with no duration is independent WebAuthn.
+ * A present value that is not a boolean or duration is unknown.
+ */
+export function mfaAssurance(organization) {
+  const config = organization?.mfa_config;
+  const missing = ['biometrics', 'security_key'];
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return { state: 'unknown', missing };
+  if (config.allowed_authenticators != null && !Array.isArray(config.allowed_authenticators)) return { state: 'unknown', missing };
+  const allowed = config.allowed_authenticators ?? [];
+  if (allowed.some(item => typeof item !== 'string')) return { state: 'unknown', missing };
+  const absent = missing.filter(item => !allowed.includes(item));
+  const duration = value => value == null ? 'absent' : typeof value === 'string' && DURATION.test(value) ? 'set' : 'bad';
+  const enabled = config.amr_matching_enabled;
+  const apiDuration = duration(config.amr_matching_session_duration);
+  const guideDuration = duration(config.amr_session_duration);
+  if ((enabled != null && typeof enabled !== 'boolean') || apiDuration === 'bad' || guideDuration === 'bad') return { state: 'unknown', missing: absent };
+  if (enabled === true || apiDuration === 'set' || guideDuration === 'set') return { state: 'substitute', missing: absent };
+  if (enabled == null && apiDuration === 'absent' && guideDuration === 'absent') return { state: 'unknown', missing: absent };
+  return { state: 'independent', missing: absent };
+}
+function demandIndependentMfa(assurance) {
+  demand(assurance.state === 'independent', assurance.state === 'substitute' ? 'MFA_IDP_SUBSTITUTE' : 'MFA_UNKNOWN', assurance.state === 'substitute'
+    ? 'This organization lets identity-provider MFA replace the independent WebAuthn prompt. Turn off “Use identity provider MFA” in the Zero Trust Access settings, then reload. This plugin does not change that shared setting.'
+    : 'The organization response did not show whether identity-provider MFA can replace independent WebAuthn. Reload the account before publishing. Nothing was changed.');
+}
 const id = value => encodeURIComponent(value);
 const exact = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export class Cloudflare {
@@ -48,12 +81,13 @@ export class Cloudflare {
       this.list(`/accounts/${id(accountId)}/access/identity_providers`, signal),
     ]);
     issuer(organization.auth_domain);
-    const allowed = organization.mfa_config?.allowed_authenticators ?? [];
+    const assurance = mfaAssurance(organization);
     return {
       zones: zones.filter(z => z.account?.id === accountId && z.status === 'active').map(z => ({ id: z.id, name: z.name })),
       teamDomain: organization.auth_domain,
       idps: idps.map(p => ({ id: p.id, name: p.name, type: p.type })),
-      mfaMissing: ['biometrics', 'security_key'].filter(x => !allowed.includes(x)),
+      mfa: assurance.state,
+      mfaMissing: assurance.missing,
       organizationRevision: digest(JSON.stringify(organization)),
     };
   }
@@ -74,6 +108,7 @@ export class Cloudflare {
     demand(zone.account?.id === setup.accountId && zone.status === 'active', 'ZONE', 'Select an active DNS zone belonging to this account.');
     demand(setup.hostname.endsWith(`.${zone.name}`), 'ZONE', 'Use a dedicated subdomain inside the selected zone, not its apex.');
     demand(account.idps.some(x => x.id === setup.idpId), 'IDP', 'The identity provider does not belong to this account.');
+    demandIndependentMfa({ state: account.mfa, missing: account.mfaMissing });
     demand(account.mfaMissing.length === 0, 'MFA_REQUIRED', 'Enable biometrics and security keys in Access first, using the reviewed shared-settings action.');
     setup.teamDomain = account.teamDomain; return setup;
   }
@@ -85,7 +120,12 @@ function overlaps(domain, host) {
 }
 export async function validateAccess(cf, setup, owned, instanceId, signal) {
   const base = `/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}`;
-  const [app, policies] = await Promise.all([cf.get(base, signal), cf.list(`${base}/policies`, signal)]);
+  const [organization, app, policies] = await Promise.all([
+    cf.get(`/accounts/${id(setup.accountId)}/access/organizations`, signal),
+    cf.get(base, signal),
+    cf.list(`${base}/policies`, signal),
+  ]);
+  demandIndependentMfa(mfaAssurance(organization));
   demand(app.name === `dsh-cf-${instanceId}` && app.domain === setup.hostname && app.type === 'self_hosted' && /^[a-f0-9]{64}$/i.test(app.aud), 'ACCESS_CHANGED', 'The owned Access application no longer matches this instance.');
   demand(!owned.audience || app.aud === owned.audience, 'ACCESS_CHANGED', 'The Access audience changed. Re-enrollment is required.');
   demand(app.mfa_config?.mfa_disabled === false && exact([...(app.mfa_config.allowed_authenticators ?? [])].sort(), ['biometrics', 'security_key']), 'MFA_CHANGED', 'The application must require WebAuthn biometrics/security keys only.');
@@ -98,6 +138,23 @@ export async function validateAccess(cf, setup, owned, instanceId, signal) {
   return app;
 }
 
+/** Read the current token for the owned Tunnel and replace the local file only after the value is valid. */
+export async function refreshTunnelToken(cf, store, signal) {
+  const { setup, owned, instanceId } = store.state;
+  demand(setup?.accountId && owned?.tunnelId, 'SETUP', 'Save this instance’s Tunnel before refreshing its connector token.');
+  const tunnelPath = `/accounts/${id(setup.accountId)}/cfd_tunnel/${id(owned.tunnelId)}`;
+  const tunnel = await cf.get(tunnelPath, signal);
+  demand(tunnel?.name === `dsh-cf-${instanceId}` && !tunnel.deleted_at, 'TUNNEL_CHANGED', 'The stored Tunnel ID no longer belongs to this instance.');
+  const token = await cf.get(`${tunnelPath}/token`, signal);
+  signal?.throwIfAborted();
+  const raw = typeof token === 'string' ? token : token?.token;
+  await store.writeToken(acceptedConnectorToken(raw, setup.accountId, owned.tunnelId));
+}
+function acceptedConnectorToken(raw, accountId, tunnelId) {
+  const parsed = parseConnectorToken(raw);
+  demand(parsed && parsed.accountId === accountId && parsed.tunnelId === String(tunnelId).toLowerCase(), 'TOKEN', 'Cloudflare returned an invalid connector token.');
+  return raw;
+}
 /** Durable checkpoints record our IDs; a lost POST result is never silently retried. */
 export async function provision(cf, store, setup, gatePort, signal, progress = () => {}) {
   const s = store.state; const owned = s.owned; const marker = `dsh-cf-${s.instanceId}`;
@@ -133,7 +190,7 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
   if (!owned.tunnelId) {
     await writeNew('tunnel', `/accounts/${id(setup.accountId)}/cfd_tunnel`, { name: marker, config_src: 'cloudflare' }, async tunnel => {
       demand(typeof tunnel?.id === 'string', 'CF_CREATE', 'Cloudflare returned no Tunnel ID.'); owned.tunnelId = tunnel.id;
-      if (tunnel.token) await store.writeToken(tunnel.token);
+      if (tunnel.token) await store.writeToken(acceptedConnectorToken(tunnel.token, setup.accountId, tunnel.id));
     });
   }
   const tunnelPath = `/accounts/${id(setup.accountId)}/cfd_tunnel/${id(owned.tunnelId)}`;
@@ -145,9 +202,8 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
   const rules = existing?.config?.ingress;
   demand(rules?.length === 2 && rules[0]?.hostname === setup.hostname && rules[0].service === desired.config.ingress[0].service && rules[0].originRequest?.access?.required === true && rules[0].originRequest.access.teamName === desired.config.ingress[0].originRequest.access.teamName && exact(rules[0].originRequest.access.audTag, [owned.audience]) && rules[1]?.service === 'http_status:404', 'TUNNEL_CHANGED', 'The owned Tunnel routing does not match the expected configuration. Publication was stopped.');
   if (!owned.ingressConfigured) { owned.ingressConfigured = true; await store.save(); }
-  if (!(await store.hasToken())) {
-    const token = await cf.get(`${tunnelPath}/token`, signal); await store.writeToken(typeof token === 'string' ? token : token.token);
-  }
+  // Re-read the current connector token after the Tunnel is confirmed as ours. A failed read does not replace the saved file.
+  await refreshTunnelToken(cf, store, signal);
   progress('dns');
   if (!owned.dnsId) {
     await writeNew('dns', `/zones/${id(setup.zoneId)}/dns_records`, { type: 'CNAME', name: setup.hostname, content: `${owned.tunnelId}.cfargotunnel.com`, proxied: true, ttl: 1, comment: marker }, async record => {

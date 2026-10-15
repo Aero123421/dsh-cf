@@ -18,9 +18,9 @@ async function until(check) {
   for (let i = 0; !check() && i < 200; i++) await new Promise(r => setTimeout(r, 10));
   assert(check(), 'condition did not complete');
 }
-function websocket(port) {
+function websocket(port, path = '/api/stream') {
   return new Promise((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path: '/api/stream', headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13' } });
+    const req = request({ host: '127.0.0.1', port, path, headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13' } });
     req.once('error', reject);
     req.once('upgrade', (response, socket) => { socket.on('error', () => {}); resolve({ status: response.statusCode, socket }); });
     req.once('response', response => { response.resume(); response.once('end', () => resolve({ status: response.statusCode })); });
@@ -222,4 +222,67 @@ test('public Cloudflare gate refuses every plugin updater operation before reach
     assert.equal(result.status, 403);
   }
   assert.equal(f.upstream.calls.length, before);
+});
+test('a loopback Host is rejected and is not treated as the operator', async t => {
+  assert.throws(() => browserFence({ url: '/', method: 'GET', headers: { ...headers, host: '127.0.0.1' } }, HOST));
+  assert.throws(() => browserFence({ url: '/', method: 'GET', headers: { ...headers, host: 'localhost' } }, HOST));
+  const f = await fixture(t); await f.activate();
+  const result = await http(f.gate.port, { headers: { ...headers, host: '127.0.0.1:443' } });
+  assert.equal(result.status, 403);
+  assert.equal(f.upstream.calls.filter(call => call.path === '/' && call.headers.host === '127.0.0.1:443').length, 0);
+});
+test('upstream 503 and 401 are faults, while success and gate shutdown are not', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event) });
+  await f.activate();
+  assert.equal((await http(f.gate.port, { headers })).status, 200);
+  assert.equal(faults.length, 0);
+  const down = await http(f.gate.port, { path: '/api/down', headers });
+  assert.equal(down.status, 503);
+  assert.deepEqual(faults.at(-1), { status: 'upstream-failed', channel: 'api', httpStatus: 503 });
+  assert.equal(f.evidence.includes('api'), false);
+  const denied = await http(f.gate.port, { path: '/api/fail', method: 'POST', headers, body: 'once' });
+  assert.equal(denied.status, 401);
+  assert.deepEqual(faults.at(-1), { status: 'auth-rejected', channel: 'api' });
+  const beforeClose = faults.length;
+  await f.gate.close();
+  assert.equal(faults.length, beforeClose);
+});
+test('a WebSocket upgrade 5xx keeps the earlier successful check', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event) });
+  await f.activate();
+  const ws = await websocket(f.gate.port);
+  assert.equal(ws.status, 101);
+  assert.equal(f.evidence.includes('websocket'), true);
+  ws.socket.destroy();
+  const down = await websocket(f.gate.port, '/api/down').catch(() => ({ status: 0 }));
+  if (down.status) assert.equal(down.status, 503);
+  await until(() => faults.some(event => event.channel === 'websocket' && event.httpStatus === 503));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(faults.filter(event => event.httpStatus === 503), [{ status: 'upstream-failed', channel: 'websocket', httpStatus: 503 }]);
+  assert.equal(f.evidence.includes('websocket'), true);
+  assert.equal(faults.filter(event => event.status === 'upstream-failed' && event.httpStatus === undefined && event.channel === 'websocket').length, 0);
+});
+test('a later HTTP 5xx is forwarded without removing the earlier successful check', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event) });
+  await f.activate();
+  assert.equal((await http(f.gate.port, { headers })).status, 200);
+  assert.equal(f.evidence.includes('http'), true);
+  const down = await http(f.gate.port, { path: '/down', headers });
+  assert.equal(down.status, 503);
+  assert.equal(down.body, 'unavailable');
+  assert.deepEqual(faults.filter(event => event.channel === 'http'), [{ status: 'upstream-failed', channel: 'http', httpStatus: 503 }]);
+  assert.equal(f.evidence.includes('http'), true);
+});
+test('WebSocket end and the stream lifetime are not upstream failures', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event), maximumStreamMs: 300 });
+  await f.activate();
+  const ws = await websocket(f.gate.port);
+  assert.equal(ws.status, 101);
+  await until(() => faults.some(event => event.status === 'websocket-closed'));
+  assert.equal(faults.some(event => event.status === 'upstream-failed'), false);
+  ws.socket.destroy();
 });
