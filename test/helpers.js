@@ -27,6 +27,7 @@ export async function dshFixture({ host = '127.0.0.1' } = {}) {
     }
     if (!trusted.has(req.headers.host) || req.headers.cookie !== cookie(req.headers.host)) { res.writeHead(401); res.end('unauthorized'); return; }
     if (url.pathname === '/api/fail') { res.writeHead(401); res.end('unauthorized'); return; }
+    if (url.pathname === '/api/down') { res.writeHead(503); res.end('unavailable'); return; }
     if (url.pathname === '/api/slow') { await new Promise(r => setTimeout(r, Number(url.searchParams.get('ms') || 300))); if (!res.destroyed) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('slow-ok'); } return; }
     if (url.pathname === '/events') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write('data: hello\n\n'); return; }
     res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'dsh-auth-leaked=NEVER-BROWSER; HttpOnly' }); res.end(JSON.stringify({ path: req.url, received: Buffer.concat(chunks).toString() }));

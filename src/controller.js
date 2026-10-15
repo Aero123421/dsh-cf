@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CfError, demand, safeError, pause, timeout } from './common.js';
 import { OAuth } from './oauth.js';
-import { Cloudflare, provision, removeOwned } from './cloudflare.js';
+import { Cloudflare, provision, removeOwned, refreshTunnelToken } from './cloudflare.js';
 import { ensureBinary, Connector } from './connector.js';
 import { accessVerifier } from './access.js';
 import { Gate, DIAGNOSTIC_PATH } from './gate.js';
@@ -12,18 +12,31 @@ const STEP_IDS = ['environment', 'authorization', 'access', 'tunnel', 'browser',
 export class Controller {
   constructor({ store, adapter, config = {}, fetchImpl = fetch, dependencies = {} }) {
     this.store = store; this.adapter = adapter; this.config = config; this.fetch = fetchImpl;
-    this.deps = { ensureBinary, Connector, accessVerifier, Gate, provision, removeOwned, ...dependencies };
+    this.deps = { ensureBinary, Connector, accessVerifier, Gate, provision, removeOwned, refreshTunnelToken, ...dependencies };
     this.seq = 0; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
     this.phase = 'idle'; this.error = null; this.operation = null; this.gate = null; this.connector = null;
     this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null;
     this.authGeneration = 0; this.requests = new Set(); this.stopping = null; this.closingRuntime = null; this.forgetting = null; this.evidence = {}; this.binary = null; this.disposed = false;
-    this.oauth = new OAuth({ fetchImpl, onToken: (token, until, signal, generation) => this.authorized(token, until, 'oauth', signal, generation), onState: status => { this.step('authorization', status === 'complete' ? 'done' : 'waiting', status); } });
+    this.oauthView = { phase: 'idle', attempt: 0, expiresAt: null, failure: null }; this.oauthLink = null; this.reachability = null;
+    this.oauth = new OAuth({ fetchImpl, onToken: (token, until, signal, generation) => this.authorized(token, until, 'oauth', signal, generation), onState: (status, meta) => this.noteOauth(status, meta) });
     store.onOwnershipLost = async () => {
       try { await this.stop(); }
       finally { this.phase = 'error'; this.error = { code: 'LOCK', message: 'Profile ownership was lost. Publication was stopped. Stop the other DSH before reopening this profile.' }; this.changed(); }
     };
   }
   changed() { this.seq++; }
+  noteOauth(status, meta = {}) {
+    const attempt = Number.isInteger(meta?.attempt) ? meta.attempt : this.oauthView.attempt;
+    if (Number.isInteger(meta?.attempt) && meta.attempt < this.oauthView.attempt) return;
+    const terminal = ['complete', 'denied', 'expired', 'cancelled', 'error'].includes(status);
+    if (terminal) this.oauthLink = null;
+    this.oauthView = { phase: status, attempt, expiresAt: status === 'waiting' || status === 'exchanging' ? meta.expiresAt ?? this.oauthView.expiresAt : null, failure: terminal && status !== 'complete' && status !== 'cancelled' ? meta.failure ?? null : null };
+    // An in-flight publication owns the checklist. A rejected side attempt must not paint that step as failed.
+    if (this.operation && !['waiting', 'exchanging', 'complete'].includes(status)) { this.changed(); return; }
+    const step = status === 'complete' ? 'done' : status === 'waiting' || status === 'exchanging' ? 'waiting' : status === 'cancelled' ? 'idle' : 'error';
+    const message = { complete: 'Cloudflare authorization completed', waiting: 'Waiting for the browser authorization', exchanging: 'Exchanging the authorization code', denied: 'Cloudflare authorization was declined', expired: 'The authorization attempt expired', cancelled: 'Cancelled', error: 'Cloudflare authorization did not complete' }[status] || status;
+    this.step('authorization', step, message); this.changed();
+  }
   step(id, status, message = '') {
     const step = this.steps.find(s => s.id === id); if (!step || (step.status === status && step.message === message)) return;
     Object.assign(step, { status, message }); this.changed();
@@ -102,7 +115,8 @@ export class Controller {
       verificationUrl: this.gate ? `https://${this.gate.host}${DIAGNOSTIC_PATH}?challenge=${this.gate.proofNonce}` : null,
       enrollmentUrl: s.setup ? `https://${s.setup.teamDomain}/` : this.accountDetails ? `https://${this.accountDetails.teamDomain}/` : null,
       binary: this.binary, download: this.download ?? null, evidence: { ...this.evidence },
-      oauth: { clientId: this.config.oauthClientId || '', scopes: this.config.oauthScopes || [], callbackPort: this.config.oauthCallbackPort || 8789 },
+      reachability: this.reachability ? { ...this.reachability } : null, lastVerifiedAt: s.lastVerifiedAt ?? null,
+      oauth: { clientId: this.config.oauthClientId || '', scopes: this.config.oauthScopes || [], callbackPort: this.config.oauthCallbackPort || 8789, phase: this.oauthView.phase, attempt: this.oauthView.attempt, expiresAt: this.oauthView.expiresAt, failure: this.oauthView.failure },
       lastConfigurationCheck: s.lastConfigurationCheck ?? null,
       hostReview: s.hostReview ?? null,
     };
@@ -129,9 +143,20 @@ export class Controller {
       case 'authorize':
         demand(typeof payload.token === 'string' && payload.token.length <= 16_384, 'API_TOKEN', 'Invalid API token.');
         return this.authorized(payload.token.trim(), Date.now() + 60 * 60_000, 'api');
-      case 'oauth/start': return this.oauth.begin({ authorizationId: this.invalidateAuthorization(), clientId: payload.clientId || this.config.oauthClientId, scopes: payload.scopes || this.config.oauthScopes, port: this.config.oauthCallbackPort || 8789 });
+      case 'oauth/start': {
+        const flow = await this.oauth.begin({ authorizationId: this.invalidateAuthorization(), clientId: payload.clientId || this.config.oauthClientId, scopes: payload.scopes || this.config.oauthScopes, port: this.config.oauthCallbackPort || 8789 });
+        this.oauthLink = { attempt: flow.attempt, authorizationUrl: flow.authorizationUrl, redirectUri: flow.redirectUri, expiresAt: flow.expiresAt };
+        this.changed(); return flow;
+      }
       case 'oauth/finish': return this.oauth.finish(payload.redirectUrl);
-      case 'oauth/cancel': await this.oauth.cancel(); this.step('authorization', 'idle', 'Cancelled'); return {};
+      case 'oauth/cancel': {
+        const attempt = await this.oauth.cancel();
+        if (attempt != null) this.noteOauth('cancelled', { attempt });
+        else this.step('authorization', 'idle', 'Cancelled');
+        return { phase: this.oauthView.phase };
+      }
+      case 'oauth/attempt': return this.oauthAttempt();
+      case 'token/refresh': this.hostConfirmed(); return this.launch(signal => this.refreshAndReconnect(signal));
       case 'account': return this.account(payload);
       case 'mfa/enable':
         demand(payload.approved === true, 'CONSENT', 'Review and explicitly approve the additive organization MFA change.');
@@ -173,7 +198,7 @@ export class Controller {
     return { operationId: operation.id };
   }
   async start(input, signal, resume) {
-    await this.closeRuntime(); signal.throwIfAborted(); this.evidence = {}; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
+    await this.closeRuntime(); signal.throwIfAborted(); this.evidence = {}; this.reachability = null; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
     this.phase = 'configuring'; this.step('environment', 'working', 'Checking DSH and cloudflared');
     this.hostConfirmed();
     await this.dshFacts(signal);
@@ -188,7 +213,7 @@ export class Controller {
     this.step('authorization', 'done', resume ? 'Saved connector token; management grant not required' : 'Selected Cloudflare resources verified');
     this.step('access', 'working', 'Applying the supported DSH Host trust configuration');
     await this.adapter.trust(setup.hostname); signal.throwIfAborted();
-    const gate = new this.deps.Gate({ host: setup.hostname, instanceId: s.instanceId, adapter: this.adapter, verify: null, onEvidence: kind => { if (this.gate === gate) this.recordEvidence(kind); } });
+    const gate = new this.deps.Gate({ host: setup.hostname, instanceId: s.instanceId, adapter: this.adapter, verify: null, onEvidence: kind => { if (this.gate === gate) this.recordEvidence(kind); }, onFault: event => { if (this.gate === gate) this.noteFault(event); } });
     this.gate = gate;
     const port = await gate.start(s.gatePort || 0); s.gatePort = port; await this.store.save();
     try {
@@ -203,21 +228,7 @@ export class Controller {
       gate.enabled = resume && s.proven === true;
       this.step('access', 'done', resume ? `Owner/JWT gate active; Cloudflare configuration last checked ${s.lastConfigurationCheck || 'during setup'}` : 'Owner-only Access and WebAuthn policy verified');
       this.step('tunnel', 'working', 'Waiting for cloudflared registration');
-      const connector = new this.deps.Connector(status => {
-        if (this.connector !== connector) return;
-        this.connectorStatus = status;
-        if (status === 'connected') { this.step('tunnel', 'done', 'Connector registered with Cloudflare'); this.maybeReady(); }
-        if (status === 'error' || status === 'stopped') {
-          this.connectorStatus = 'error'; this.phase = 'error';
-          this.error = { code: 'CONNECTOR_EXIT', message: 'cloudflared stopped unexpectedly. Check the connector and reconnect from the local settings.' };
-          this.step('tunnel', 'error', this.error.message); this.changed();
-          void this.closeRuntime().catch(() => {});
-        } else if (status === 'disconnected') {
-          this.step('tunnel', 'waiting', 'Connector disconnected');
-          if (this.phase === 'ready') this.phase = 'reconnecting';
-          this.changed();
-        }
-      });
+      const connector = new this.deps.Connector(status => this.onConnectorStatus(connector, status));
       this.connector = connector; this.connectorStatus = 'starting';
       await connector.start(this.binary.path, join(this.store.dir, 'tunnel.token'));
       const deadline = Date.now() + 60_000;
@@ -254,19 +265,108 @@ export class Controller {
     }
     throw new CfError('EDGE_CHECK', 'Could not verify external unauthenticated rejection. Check DNS and Access, then retry.');
   }
+  onConnectorStatus(connector, status) {
+    if (this.connector !== connector) return;
+    this.connectorStatus = status;
+    if (status === 'connected') {
+      this.step('tunnel', 'done', 'Connector registered with Cloudflare');
+      if (this.phase === 'reconnecting' || this.phase === 'rechecking') {
+        this.phase = 'rechecking';
+        this.step('dsh', 'waiting', 'Tunnel is connected. DSH HTTP, API, and WebSocket are not confirmed for this connection yet.');
+      }
+      this.maybeReady();
+    } else if (status === 'error' || status === 'stopped') {
+      this.connectorStatus = 'error'; this.phase = 'error';
+      this.error = { code: 'CONNECTOR_EXIT', message: 'cloudflared stopped unexpectedly. Check the connector and reconnect from the local settings.' };
+      this.step('tunnel', 'error', this.error.message); this.changed();
+      void this.closeRuntime().catch(() => {});
+    } else if (status === 'disconnected') {
+      this.evidence.http = false; this.evidence.api = false; this.evidence.websocket = false;
+      this.reachability = { status: 'rechecking', channel: 'tunnel' };
+      this.step('tunnel', 'waiting', 'Connector disconnected');
+      this.step('dsh', 'waiting', 'Tunnel is down. Reconnecting does not confirm DSH traffic again.');
+      if (['ready', 'degraded', 'rechecking', 'waiting-browser'].includes(this.phase)) this.phase = 'reconnecting';
+      if (this.error?.code === 'DSH_UPSTREAM' || this.error?.code === 'DSH_AUTH') this.error = null;
+      this.changed();
+    }
+  }
+  noteFault(event) {
+    if (!this.gate || this.stopping || this.disposed || this.phase === 'stopped' || this.phase === 'error') return;
+    const channel = event?.channel === 'api' || event?.channel === 'websocket' ? event.channel : 'http';
+    if (event?.status === 'websocket-closed') {
+      this.evidence.websocket = false;
+      this.reachability = { status: 'websocket-ended', channel: 'websocket' };
+      if (this.phase === 'ready' || this.phase === 'degraded') {
+        this.phase = 'rechecking';
+        this.step('dsh', 'waiting', 'WebSocket ended. This is not an upstream failure; the next DSH connection confirms it again.');
+      }
+      this.changed(); return;
+    }
+    this.evidence[channel] = false;
+    const rejected = event?.status === 'auth-rejected';
+    this.reachability = { status: rejected ? 'auth-rejected' : 'upstream-failed', channel };
+    this.phase = 'degraded';
+    this.error = rejected
+      ? { code: 'DSH_AUTH', message: 'DSH rejected the proxied session. Sign in again from the local settings. The connector was left running.' }
+      : { code: 'DSH_UPSTREAM', message: 'DSH did not answer through the tunnel. The connector is still running; this is not a new successful check.' };
+    this.step('dsh', 'error', this.error.message); this.changed();
+  }
   recordEvidence(kind) {
-    if (this.evidence[kind]) return;
+    const failed = this.reachability?.status === 'upstream-failed' || this.reachability?.status === 'auth-rejected';
+    if (this.evidence[kind] && !(failed && this.reachability.channel === kind)) return;
     this.evidence[kind] = true;
+    if (failed && this.reachability.channel === kind) {
+      this.reachability = { status: 'rechecking', channel: kind };
+      if (this.error?.code === 'DSH_UPSTREAM' || this.error?.code === 'DSH_AUTH') this.error = null;
+      if (this.phase === 'degraded') this.phase = 'rechecking';
+    }
     if (kind === 'owner') this.step('browser', 'done', 'Signed owner identity and DSH session exchange verified');
     this.changed(); this.maybeReady();
   }
   maybeReady() {
     if (!this.gate || !this.evidence.unauthenticatedRejected || !['owner', 'http', 'api', 'websocket'].every(x => this.evidence[x]) || this.connectorStatus !== 'connected') return;
+    if (this.reachability?.status === 'upstream-failed' || this.reachability?.status === 'auth-rejected') return;
+    if (this.phase === 'error') return;
     if (this.phase === 'ready') return;
-    this.phase = 'ready'; this.step('dsh', 'done', 'Real DSH HTTP, API, and WebSocket traffic confirmed');
-    this.store.state.proven = true;
+    this.phase = 'ready'; this.reachability = { status: 'ok' };
+    if (this.error?.code === 'DSH_UPSTREAM' || this.error?.code === 'DSH_AUTH') this.error = null;
+    this.step('dsh', 'done', 'Real DSH HTTP, API, and WebSocket traffic confirmed');
+    const verifiedAt = new Date().toISOString();
+    this.store.state.proven = true; this.store.state.lastVerifiedAt = verifiedAt;
     void this.store.save().catch(async () => { await this.closeRuntime(); this.phase = 'error'; this.error = { code: 'STATE_WRITE', message: 'Verification state could not be saved. Publication was stopped.' }; this.changed(); });
     this.changed();
+  }
+  oauthAttempt() {
+    const link = this.oauthLink;
+    const phase = this.oauthView.phase;
+    if (!link || (phase !== 'waiting' && phase !== 'exchanging') || Date.now() >= link.expiresAt) return { phase, attempt: this.oauthView.attempt, authorizationUrl: null, redirectUri: null, expiresAt: link?.expiresAt ?? null };
+    return { phase, attempt: link.attempt, authorizationUrl: link.authorizationUrl, redirectUri: link.redirectUri, expiresAt: link.expiresAt };
+  }
+  async refreshAndReconnect(signal) {
+    await this.deps.refreshTunnelToken(this.cf(), this.store, signal);
+    signal.throwIfAborted();
+    if (this.gate && this.connector && this.binary) return this.restartConnector(signal);
+    if (this.store.state.setup && this.store.state.lastConfigurationCheck && !this.store.state.pending && await this.store.hasToken()) return this.start({}, signal, true);
+  }
+  async restartConnector(signal) {
+    const previous = this.connector;
+    this.evidence.http = false; this.evidence.api = false; this.evidence.websocket = false;
+    this.reachability = { status: 'rechecking', channel: 'tunnel' }; this.phase = 'rechecking';
+    this.step('dsh', 'waiting', 'Connector token was reread. DSH traffic has not been confirmed again.');
+    // Detach before stop so the old process exiting is not a connector failure.
+    this.connector = null; this.changed();
+    await previous?.stop();
+    signal.throwIfAborted();
+    if (this.connector || !this.binary || !this.gate) return;
+    const connector = new this.deps.Connector(status => this.onConnectorStatus(connector, status));
+    this.connector = connector; this.connectorStatus = 'starting';
+    await connector.start(this.binary.path, join(this.store.dir, 'tunnel.token'));
+    const deadline = Date.now() + 60_000;
+    while (this.connector === connector && this.connectorStatus !== 'connected') {
+      signal.throwIfAborted();
+      demand(!['error', 'stopped'].includes(this.connectorStatus) && Date.now() < deadline, 'CONNECTOR_TIMEOUT', 'cloudflared did not establish a connection after the token refresh.');
+      await pause(200, signal);
+    }
   }
   closeRuntime() {
     if (this.closingRuntime) return this.closingRuntime;
@@ -280,6 +380,8 @@ export class Controller {
   }
   stop() {
     if (this.stopping) return this.stopping;
+    this.oauthLink = null;
+    if (['waiting', 'exchanging'].includes(this.oauthView.phase)) this.oauthView = { phase: 'cancelled', attempt: this.oauthView.attempt, expiresAt: null, failure: null };
     this.invalidateAuthorization();
     const cancelled = this.oauth.cancel();
     const operation = this.operation;
@@ -288,7 +390,12 @@ export class Controller {
     const work = [operation?.promise, this.forgetting?.promise, ...[...this.requests].map(request => request.promise)];
     const stopping = Promise.resolve().then(async () => {
       await cancelled; await Promise.allSettled(work);
-      await this.closeRuntime(); this.phase = 'stopped'; this.step('tunnel', 'idle', 'Stopped locally; Cloudflare resources are retained'); this.changed();
+      this.oauthLink = null;
+      if (['waiting', 'exchanging', 'expired', 'error', 'denied'].includes(this.oauthView.phase)) this.oauthView = { phase: 'cancelled', attempt: this.oauthView.attempt, expiresAt: null, failure: null };
+      await this.closeRuntime();
+      this.evidence = {}; this.reachability = null; this.phase = 'stopped';
+      this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
+      this.step('tunnel', 'idle', 'Stopped locally; Cloudflare resources are retained'); this.changed();
     }).finally(() => { if (this.stopping === stopping) this.stopping = null; this.changed(); });
     this.stopping = stopping; this.changed();
     return stopping;

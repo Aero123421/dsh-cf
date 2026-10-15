@@ -5,12 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
-import { Updates, compareVersions, checkedCandidate, supportsSource, VERSION } from '../src/updates.js';
+import { Updates, compareVersions, checkedCandidate, supportsSource, dshPeerSatisfies, releaseSpecs, VERSION } from '../src/updates.js';
+import manifest from '../package.json' with { type: 'json' };
 const PROFILE_KEY = 'a'.repeat(64);
 const RUNTIME = '0.2.1-alpha.2', REPO = 'Aero123421/dsh-cf';
 const NEXT = '0.1.0-alpha.5';
 function release(version, id = 1) { return { id, tag_name: 'v'+version, draft: false, prerelease: version.includes('-'), html_url: `https://github.com/${REPO}/releases/tag/v${version}`, body: 'Release notes', assets: [] }; }
-function pkg(version = NEXT) { return { name: 'dsh-cf', version, dsh: { bundle: { patch: './cordis.patch.yml' } }, exports: { '.': './src/index.js', './client': './src/client.js' }, peerDependencies: { '@deepseek-ai/dsh': RUNTIME } }; }
+const DSH_RANGE = '>=0.2.1-alpha.2 <0.3.0-0';
+function pkg(version = NEXT, peer = RUNTIME) {
+  return { name: 'dsh-cf', version, dsh: { bundle: { patch: './cordis.patch.yml' } }, exports: { '.': './src/index.js', './client': './src/client.js' }, peerDependencies: peer && typeof peer === 'object' ? peer : { '@deepseek-ai/dsh': peer } };
+}
 function github(releases = [release(NEXT)], packageValue) {
   return async url => url.includes('/releases?') ? Response.json(releases) : Response.json(packageValue || pkg(url.split('/').at(-2).slice(1)));
 }
@@ -34,12 +38,35 @@ test('Source-only releases select exactly the chosen channel without requiring a
   assert.equal((await checkedCandidate('stable', RUNTIME, github())).status, 'channel-empty');
   assert.equal((await checkedCandidate('prerelease', RUNTIME, github([]))).status, 'no-release');
   assert.equal(supportsSource('file:/custom/plugin'), false); assert.equal(supportsSource(`github:${REPO}#v${VERSION}`), true);
+  assert.equal(supportsSource(releaseSpecs(`v${VERSION}`)[1]), true);
+});
+test('DSH peer range includes alpha.2, alpha.3 and later 0.2 prereleases, and excludes 0.3', () => {
+  assert.equal(manifest.peerDependencies['@deepseek-ai/dsh'], DSH_RANGE);
+  for (const version of ['0.2.1-alpha.2', '0.2.1-alpha.3', '0.2.1-alpha.10', '0.2.1', '0.2.2-alpha.1', '0.2.2', '0.2.9-rc.1', '0.2.1-alpha.2+build.1']) assert.equal(dshPeerSatisfies(version, DSH_RANGE), true, version);
+  for (const version of ['0.2.0-rc.2', '0.2.1-alpha.1', '0.3.0-0', '0.3.0-alpha.1', '0.3.0', '1.0.0']) assert.equal(dshPeerSatisfies(version, DSH_RANGE), false, version);
+  assert.equal(dshPeerSatisfies('0.3.0-alpha.1', '>=0.2.1-alpha.2 <0.3.0'), true);
+  assert.equal(dshPeerSatisfies('0.2.1-alpha.2', '0.2.1-alpha.2'), true);
+  assert.equal(dshPeerSatisfies('0.2.1-alpha.3', '0.2.1-alpha.2'), false);
+  assert.equal(dshPeerSatisfies('0.2.1-alpha.3', '0.2.1-alpha.2 || >=0.2.1-alpha.3 <0.3.0-0'), true);
+  for (const range of ['^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.x', '0.2.1-alpha.2 - 0.3.0', '*', 'workspace:^', 'workspace:~', 'workspace:*']) assert.equal(dshPeerSatisfies('0.2.1-alpha.3', range), true, range);
+  for (const range of ['', ' ', '~0.2.1', '>=0.2.1-alpha.2 || ^0.2.2.0', 'not a range', 'workspace:foo']) assert.equal(dshPeerSatisfies('0.2.1-alpha.3', range), false, range);
+  assert.equal(dshPeerSatisfies('0.2.1-alpha.2', '^0.2.1-alpha.2'), true);
+  assert.equal(dshPeerSatisfies('0.2.0', '0.2.x'), true);
 });
 test('Invalid metadata, channel mismatch, package identity, compatibility, redirects and sizes fail closed', async () => {
   for (const item of [{ ...release(NEXT), id: 0 }, { ...release(NEXT), prerelease: false }, { ...release(NEXT), html_url: 'https://evil.example' }, { ...release(NEXT), tag_name: 'v0.1.0-alpha.01' }]) await assert.rejects(checkedCandidate('prerelease', RUNTIME, github([item])));
   await assert.rejects(checkedCandidate('prerelease', RUNTIME, github([release(NEXT), release(NEXT)])));
   await assert.rejects(checkedCandidate('prerelease', RUNTIME, github(undefined, { ...pkg(), name: 'other' })));
   await assert.rejects(checkedCandidate('prerelease', '0.2.2', github()), { code: 'UPDATE_COMPATIBILITY' });
+  await assert.rejects(checkedCandidate('prerelease', '0.2.1-alpha.3', github()), { code: 'UPDATE_COMPATIBILITY' });
+  const ranged = github(undefined, pkg(NEXT, DSH_RANGE));
+  for (const runtime of ['0.2.1-alpha.2', '0.2.1-alpha.3', '0.2.2-alpha.1', '0.2.9-rc.1']) assert.equal((await checkedCandidate('prerelease', runtime, ranged)).candidate.version, NEXT);
+  for (const runtime of ['0.2.0-rc.2', '0.2.1-alpha.1', '0.3.0-0', '0.3.0-alpha.1', '0.3.0']) await assert.rejects(checkedCandidate('prerelease', runtime, ranged), { code: 'UPDATE_COMPATIBILITY' });
+  assert.equal((await checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, '^0.2.1-alpha.2')))).status, 'available');
+  assert.equal((await checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, 'workspace:^')))).status, 'available');
+  await assert.rejects(checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, { '@deepseek-ai/dsh': DSH_RANGE, '@deepseek-ai/dsh-client': '0.2.1-alpha.2' }))), { code: 'UPDATE_COMPATIBILITY' });
+  assert.equal((await checkedCandidate('prerelease', '0.2.1-alpha.2', github(undefined, pkg(NEXT, { '@deepseek-ai/dsh': DSH_RANGE, '@deepseek-ai/dsh-client': '0.2.1-alpha.2' })))).status, 'available');
+  assert.equal((await checkedCandidate('prerelease', RUNTIME, github(undefined, pkg(NEXT, { '@deepseek-ai/dsh': DSH_RANGE, '@other/tool': 'broken' })))).status, 'available');
   await assert.rejects(checkedCandidate('prerelease', RUNTIME, async () => new Response('[]', { status: 404 })), { code: 'UPDATE_FETCH' });
   await assert.rejects(checkedCandidate('prerelease', RUNTIME, async () => new Response('x'.repeat(600_000))), { code: 'RESPONSE_SIZE' });
   await assert.rejects(checkedCandidate('prerelease', RUNTIME, async (_url, options) => { assert.equal(options.redirect, 'error'); throw new Error('redirect'); }));
@@ -194,6 +221,53 @@ test('Reload after the first install reply is lost reconciles its scoped ID with
   await next.status(); assert.equal(next.operation, id); assert.equal(next.view.status, 'unknown'); assert.equal(requests.at(-1).payload.operationId, id); assert.equal(requests.filter(item => item.method === 'update-install').length, 1); next.dispose();
 });
 
+test('HMR already-installed installs the same tag through a different git URL and does not remove this plugin', async t => {
+  const removed = [];
+  const { updates, calls, bundle } = await fixture(t, { manager: {
+    removeBundle: async () => { removed.push('remove'); throw new Error('must not remove'); },
+    installBundle: async (spec, config) => {
+      calls.push({ spec, config });
+      if (spec.startsWith('github:')) return { application: 'failed', stage: 'install', error: { code: 'already-installed' } };
+      bundle.version = NEXT; bundle.source = spec;
+      return { application: 'restart-required', stage: 'install', bundle: 'dsh-cf', version: NEXT };
+    },
+  } });
+  const checked = await updates.check('prerelease');
+  const view = await updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey);
+  assert.equal(view.status, 'restart-required');
+  assert.deepEqual(calls.map(call => call.spec), releaseSpecs(`v${NEXT}`));
+  assert.equal(calls[0].config.requestId, calls[1].config.requestId);
+  assert.equal(calls[1].config.enabled, false);
+  assert.equal(supportsSource(bundle.source), true);
+  assert.deepEqual(removed, []);
+});
+test('already-installed reconciles when the release is on disk and refuses a newer install or a repeated refusal without removal', async t => {
+  const removed = [];
+  let installs = 0;
+  const present = await fixture(t, { manager: {
+    removeBundle: async () => { removed.push('remove'); },
+    installBundle: async () => { installs++; present.bundle.version = NEXT; return { application: 'failed', stage: 'install', error: { code: 'already-installed' } }; },
+  }, core: { version: NEXT } });
+  let checked = await present.updates.check('prerelease');
+  assert.equal((await present.updates.install(checked.candidate.id, randomUUID(), 'prerelease', present.updates.profileKey)).status, 'confirmed');
+  assert.equal(installs, 1);
+  const ahead = await fixture(t, { manager: {
+    removeBundle: async () => { removed.push('remove'); },
+    installBundle: async (spec) => { ahead.calls.push(spec); ahead.bundle.version = '0.1.0-alpha.9'; return { application: 'failed', stage: 'install', error: { code: 'already-installed' } }; },
+  } });
+  checked = await ahead.updates.check('prerelease');
+  assert.equal((await ahead.updates.install(checked.candidate.id, randomUUID(), 'prerelease', ahead.updates.profileKey)).reason, 'UPDATE_CANDIDATE');
+  assert.equal(ahead.calls.length, 1);
+  const blocked = await fixture(t, { manager: {
+    removeBundle: async () => { removed.push('remove'); },
+    installBundle: async (spec) => { blocked.calls.push(spec); return { application: 'failed', stage: 'install', error: { code: 'already-installed' } }; },
+  } });
+  checked = await blocked.updates.check('prerelease');
+  const refused = await blocked.updates.install(checked.candidate.id, randomUUID(), 'prerelease', blocked.updates.profileKey);
+  assert.equal(refused.status, 'failed'); assert.equal(refused.reason, 'UPDATE_ALREADY_INSTALLED');
+  assert.deepEqual(blocked.calls, releaseSpecs(`v${NEXT}`));
+  assert.deepEqual(removed, []);
+});
 test('A rejected delayed profile install clears its unadmitted browser ID', async () => {
   const { Controller, storage } = await clientController();
   const client = new Controller({ rpc: { call: async (_base, method) => method === 'update-install' ? { ok: false, error: { code: 'UPDATE_PROFILE' } } : { ok: true, value: { status: 'available', profileKey: PROFILE_KEY, running: VERSION, channel: 'prerelease', candidate: { id: 'candidate', version: NEXT, notes: '', url: `https://github.com/${REPO}/releases/tag/v${NEXT}` } } } } });

@@ -18,6 +18,11 @@ export function endpointOf(pathname) {
   const endpoint = pathname.slice(CHANNEL.length + 1);
   return endpoint.split('/').every(s => s !== '' && s !== '.' && s !== '..' && SEGMENT.test(s)) ? endpoint : undefined;
 }
+/**
+ * Management authority is the TCP peer. Host is an extra constraint and never grants access:
+ * a public peer that sends Host 127.0.0.1 is denied, and a loopback peer with a public Host
+ * or any forwarding header is denied too. Undefined peers fail closed.
+ */
 export function isManagementRequest(req) {
   const address = req.socket?.remoteAddress?.replace(/^::ffff:/, '');
   const loopback = value => value === 'localhost' || value === '::1' || value === '[::1]' || /^127\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}$/.test(value || '') && value.split('.').every(part => Number(part) <= 255);
@@ -71,7 +76,7 @@ export function rpcRoute(connection, handle) {
       }
       let url; try { url = new URL(req.url, 'http://local.invalid'); } catch { return text(res, 404, 'not found'); }
       const endpoint = endpointOf(url.pathname);
-      if (endpoint?.startsWith('update-') && !isManagementRequest(req)) return text(res, 403, 'management connection required');
+      if ((endpoint === 'oauth/attempt' || endpoint?.startsWith('update-')) && !isManagementRequest(req)) return text(res, 403, 'management connection required');
       if (req.method !== 'POST' || endpoint === undefined || url.search) return text(res, 404, 'not found');
       if (String(req.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase() !== 'application/json') return text(res, 415, 'content type must be application/json');
       let raw;

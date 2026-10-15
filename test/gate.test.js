@@ -223,3 +223,38 @@ test('public Cloudflare gate refuses every plugin updater operation before reach
   }
   assert.equal(f.upstream.calls.length, before);
 });
+test('a loopback Host is rejected and is not treated as the operator', async t => {
+  assert.throws(() => browserFence({ url: '/', method: 'GET', headers: { ...headers, host: '127.0.0.1' } }, HOST));
+  assert.throws(() => browserFence({ url: '/', method: 'GET', headers: { ...headers, host: 'localhost' } }, HOST));
+  const f = await fixture(t); await f.activate();
+  const result = await http(f.gate.port, { headers: { ...headers, host: '127.0.0.1:443' } });
+  assert.equal(result.status, 403);
+  assert.equal(f.upstream.calls.filter(call => call.path === '/' && call.headers.host === '127.0.0.1:443').length, 0);
+});
+test('upstream 503 and 401 are faults, while success and gate shutdown are not', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event) });
+  await f.activate();
+  assert.equal((await http(f.gate.port, { headers })).status, 200);
+  assert.equal(faults.length, 0);
+  const down = await http(f.gate.port, { path: '/api/down', headers });
+  assert.equal(down.status, 503);
+  assert.deepEqual(faults.at(-1), { status: 'upstream-failed', channel: 'api' });
+  assert.equal(f.evidence.includes('api'), false);
+  const denied = await http(f.gate.port, { path: '/api/fail', method: 'POST', headers, body: 'once' });
+  assert.equal(denied.status, 401);
+  assert.deepEqual(faults.at(-1), { status: 'auth-rejected', channel: 'api' });
+  const beforeClose = faults.length;
+  await f.gate.close();
+  assert.equal(faults.length, beforeClose);
+});
+test('WebSocket end and the stream lifetime are not upstream failures', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event), maximumStreamMs: 300 });
+  await f.activate();
+  const ws = await websocket(f.gate.port);
+  assert.equal(ws.status, 101);
+  await until(() => faults.some(event => event.status === 'websocket-closed'));
+  assert.equal(faults.some(event => event.status === 'upstream-failed'), false);
+  ws.socket.destroy();
+});

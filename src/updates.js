@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import semver from 'semver';
 import { CfError, demand, boundedJson } from './common.js';
 import manifest from '../package.json' with { type: 'json' };
 
@@ -29,10 +30,25 @@ export function compareVersions(left, right) {
   }
   return 0;
 }
+const WORKSPACE_RANGE = new Set(['workspace:^', 'workspace:~', 'workspace:*']);
+/** Same predicate as DSH app-boot `evaluatePluginCompatibility`: prereleases count, and `workspace:^` / `workspace:~` / `workspace:*` mean the running version. Blank or invalid ranges are incompatible. */
+export function dshPeerSatisfies(version, range) {
+  if (typeof version !== 'string' || typeof range !== 'string' || semver.valid(version) === null) return false;
+  const requirement = WORKSPACE_RANGE.has(range) ? version : range;
+  if (requirement.trim() === '') return false;
+  try { return semver.satisfies(version, requirement, { includePrerelease: true }); }
+  catch { return false; }
+}
 function object(value) { demand(value && typeof value === 'object' && !Array.isArray(value), 'UPDATE_METADATA', 'リリース情報を確認できません。'); return value; }
 function channelOf(channel) { demand(['stable', 'prerelease'].includes(channel), 'UPDATE_CHANNEL', '更新channelを選択してください。'); return channel; }
 export function supportsSource(source) {
   return typeof source === 'string' && (/^github:Aero123421\/dsh-cf(?:#[A-Za-z0-9._/-]+)?$/.test(source) || /^(?:git\+)?https:\/\/github\.com\/Aero123421\/dsh-cf(?:\.git)?(?:#[A-Za-z0-9._/-]+)?$/.test(source));
+}
+export function releaseSpecs(tag) {
+  return [`github:${REPOSITORY}#${tag}`, `git+https://github.com/${REPOSITORY}.git#${tag}`];
+}
+function alreadyInstalled(result) {
+  return result?.application === 'failed' && result?.error?.code === 'already-installed';
 }
 export function runtimeVersion(profile) {
   try {
@@ -69,8 +85,8 @@ export async function checkedCandidate(channel, runtime, fetcher = fetch, signal
   demand(pkg.name === 'dsh-cf' && pkg.version === candidate.version && object(object(pkg.dsh).bundle).patch === './cordis.patch.yml' && pkg.exports?.['.'] === './src/index.js' && pkg.exports?.['./client'] === './src/client.js', 'UPDATE_METADATA', '対象プラグインと版を確認できません。');
   const peers = object(pkg.peerDependencies), ranges = Object.entries(peers).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'));
   demand(runtime && ranges.length && typeof peers['@deepseek-ai/dsh'] === 'string', 'UPDATE_COMPATIBILITY', '対応DSHの版を確認できません。手動更新先を確認してください。');
-  // This source bundle declares exact DSH peers. Unknown range contracts require review.
-  for (const [, range] of ranges) { semanticVersion(range); demand(compareVersions(runtime, range) === 0, 'UPDATE_COMPATIBILITY', 'このリリースは使用中のDSHに対応していません。'); }
+  // Same predicate as DSH app-boot evaluatePluginCompatibility, including ^, ~, x-ranges, *, and workspace protocols.
+  for (const [, range] of ranges) demand(typeof range === 'string' && dshPeerSatisfies(runtime, range), 'UPDATE_COMPATIBILITY', 'このリリースは使用中のDSHに対応していません。');
   return { candidate: { ...candidate, runtime }, status: 'available' };
 }
 function safeResult(result) {
@@ -189,7 +205,31 @@ export class Updates {
         // No await between this lifetime/workflow guard and manager invocation.
         demand(!this.closed && !this.busy(), 'UPDATE_BUSY', '別の処理が進行中です。');
         started = true;
-        const result = await manager.installBundle(`github:${REPOSITORY}#${candidate.tag}`, { enabled: latest.bundle.enabled, requestId: operationId });
+        const specs = releaseSpecs(candidate.tag);
+        let enabled = latest.bundle.enabled, result;
+        for (let index = 0; index < specs.length; index++) {
+          result = await manager.installBundle(specs[index], { enabled, requestId: operationId });
+          if (!alreadyInstalled(result) || this.closed) break;
+          // DSH 0.2.1-alpha.3 with HMR returns already-installed before pnpm when the spec
+          // matches the saved dependency, and changes no profile file. A different git URL of
+          // the same tag does not match that string, so installBundle still runs pnpm.
+          // Do not removeBundle here. The official Update runs in the plugin-manager UI, which
+          // stays loaded; removeBundle with HMR reloads and stops this plugin before that call
+          // returns, so the following install would not run.
+          let current;
+          try { current = await this.bundle(); }
+          catch (error) {
+            result = { application: 'failed', stage: 'install', error: { code: error instanceof CfError ? error.code : 'UPDATE_ALREADY_INSTALLED' } };
+            break;
+          }
+          const order = compareVersions(current.bundle.version, candidate.version);
+          if (order === 0) { result = { application: 'restart-required', stage: 'install', bundle: 'dsh-cf', version: current.bundle.version }; break; }
+          if (order > 0) { result = { application: 'failed', stage: 'install', error: { code: 'UPDATE_CANDIDATE' } }; break; }
+          if (index === specs.length - 1) { result = { application: 'failed', stage: 'install', error: { code: 'UPDATE_ALREADY_INSTALLED' } }; break; }
+          if (this.closed) break;
+          if (this.busy()) { result = { application: 'failed', stage: 'install', error: { code: 'UPDATE_BUSY' } }; break; }
+          enabled = current.bundle.enabled;
+        }
         this.operation.result = safeResult(result); await this.save(); const after = (await manager.listBundles()).find(item => item.name === 'dsh-cf');
         const view = this.result(result, after); await this.save(); return view;
       } catch (error) {

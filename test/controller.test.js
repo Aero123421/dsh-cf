@@ -59,7 +59,10 @@ test('temporary disconnection can recover, but fatal connector events close runt
   for (const kind of ['owner', 'http', 'api', 'websocket']) f.gate.onEvidence(kind);
   assert.equal(f.controller.phase, 'ready');
   f.connector.status('disconnected'); assert.equal(f.controller.phase, 'reconnecting');
-  f.connector.status('connected'); assert.equal(f.controller.phase, 'ready');
+  assert.equal(f.controller.evidence.http, false); assert.equal(f.controller.evidence.websocket, false);
+  f.connector.status('connected'); assert.equal(f.controller.phase, 'rechecking'); assert.notEqual(f.controller.phase, 'ready');
+  for (const kind of ['http', 'api', 'websocket']) f.gate.onEvidence(kind);
+  assert.equal(f.controller.phase, 'ready');
   const connector = f.connector, gate = f.gate;
   connector.status('error'); connector.status('stopped'); connector.status('connected');
   await new Promise(r => setImmediate(r));
@@ -251,4 +254,132 @@ test('a loopback OAuth callback cannot replace credentials during provisioning',
   await assert.rejects(f.controller.oauth.finish(oauthCallback(flow)), { code: 'BUSY' });
   assert.equal(f.controller.token, 'management-secret-test-123456');
   release.resolve(); await operation; assert.equal(f.controller.phase, 'waiting-browser');
+});
+
+test('oauth phases stay on the host and status never carries the authorization URL or PKCE', async t => {
+  const port = await freePort();
+  const api = fakeCloudflare();
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, config: { oauthCallbackPort: port }, fetchImpl: async (url, options) => {
+    if (String(url).endsWith('/oauth2/token')) return new Response('no', { status: 400 });
+    return api.fetchImpl(url, options);
+  } });
+  t.after(() => controller.dispose());
+  const flow = await controller.handle('oauth/start', oauthPayload);
+  const snap = JSON.stringify(controller.snapshot());
+  assert.equal(controller.snapshot().oauth.phase, 'waiting');
+  assert.equal(snap.includes('code_challenge'), false);
+  assert.equal(snap.includes('code_verifier'), false);
+  assert.equal(snap.includes(flow.authorizationUrl), false);
+  assert.equal((await controller.handle('oauth/attempt')).authorizationUrl, flow.authorizationUrl);
+  controller.noteOauth('error', { attempt: flow.attempt - 1, failure: 'OAUTH_EXCHANGE' });
+  assert.equal(controller.snapshot().oauth.phase, 'waiting');
+  const state = new URL(flow.authorizationUrl).searchParams.get('state');
+  await assert.rejects(controller.handle('oauth/finish', { redirectUrl: `${flow.redirectUri}?error=access_denied&state=${state}` }), { code: 'OAUTH_DENIED' });
+  assert.equal(controller.snapshot().oauth.phase, 'denied');
+  assert.equal(controller.snapshot().oauth.failure, 'OAUTH_DENIED');
+  assert.equal((await controller.handle('oauth/attempt')).authorizationUrl, null);
+  const again = await controller.handle('oauth/start', oauthPayload);
+  await assert.rejects(controller.handle('oauth/finish', { redirectUrl: oauthCallback(again) }), { code: 'OAUTH_EXCHANGE' });
+  assert.equal(controller.snapshot().oauth.phase, 'error');
+  assert.equal(controller.snapshot().oauth.failure, 'OAUTH_EXCHANGE');
+  assert.equal(JSON.stringify(controller.snapshot()).includes(again.authorizationUrl), false);
+});
+test('an upstream failure is not success, and reconnect does not restore ready without new DSH traffic', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  for (const kind of ['owner', 'http', 'api', 'websocket']) f.gate.onEvidence(kind);
+  assert.equal(f.controller.phase, 'ready');
+  const verified = f.store.state.lastVerifiedAt;
+  assert.equal(typeof verified, 'string');
+  f.gate.onFault({ status: 'upstream-failed', channel: 'http' });
+  assert.equal(f.controller.phase, 'degraded');
+  assert.equal(f.controller.error.code, 'DSH_UPSTREAM');
+  assert.equal(f.controller.evidence.http, false);
+  assert.equal(f.controller.evidence.api, true);
+  f.gate.onFault({ status: 'auth-rejected', channel: 'api' });
+  assert.equal(f.controller.phase, 'degraded');
+  assert.equal(f.controller.error.code, 'DSH_AUTH');
+  f.connector.status('disconnected');
+  f.connector.status('connected');
+  assert.equal(f.controller.phase, 'rechecking');
+  assert.notEqual(f.controller.phase, 'ready');
+  await f.controller.handle('stop');
+  assert.equal(f.controller.phase, 'stopped');
+  assert.equal(f.store.state.lastVerifiedAt, verified);
+  assert.equal(f.store.state.proven, true);
+  assert.equal(f.controller.snapshot().evidence.http, undefined);
+  assert(f.controller.snapshot().steps.every(step => step.status === 'idle'));
+});
+test('a closed WebSocket asks for another check and silence does not change that state', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  for (const kind of ['owner', 'http', 'api', 'websocket']) f.gate.onEvidence(kind);
+  f.gate.onFault({ status: 'websocket-closed', channel: 'websocket' });
+  assert.equal(f.controller.phase, 'rechecking');
+  assert.equal(f.controller.error, null);
+  assert.equal(f.connector.stopped, undefined);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(f.controller.phase, 'rechecking');
+});
+test('token refresh restarts only the connector, and a failed refetch keeps the saved token', async t => {
+  let refreshes = 0;
+  const f = await fixture(t, { refreshTunnelToken: async (_cf, store) => {
+    refreshes++;
+    if (refreshes > 1) throw new CfError('CF_NETWORK', 'Cloudflare did not respond.');
+    store.token = 'refreshed-connector-token-123456789';
+  } });
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  const first = f.connector;
+  first.stop = async () => { first.stopped = true; first.status('stopped'); };
+  await f.controller.handle('token/refresh'); await f.controller.operation.promise;
+  assert.equal(refreshes, 1);
+  assert.equal(first.stopped, true);
+  assert.notEqual(f.connector, first);
+  assert.equal(f.controller.phase, 'rechecking');
+  assert.equal(f.controller.gate.closed, undefined);
+  assert.equal(f.store.state.owned.tunnelId, 'tunnel');
+  const saved = f.store.token;
+  await f.controller.handle('token/refresh'); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'error');
+  assert.equal(f.controller.error.code, 'CF_NETWORK');
+  assert.equal(f.store.token, saved);
+  assert.equal(JSON.stringify(f.controller.snapshot()).includes(saved), false);
+});
+test('cancel during token refresh does not write a replacement token', async t => {
+  const entered = deferred(); let writes = 0;
+  const f = await fixture(t, { refreshTunnelToken: async (_cf, _store, signal) => {
+    entered.resolve();
+    await new Promise((_resolve, reject) => { if (signal.aborted) reject(signal.reason); else signal.addEventListener('abort', () => reject(signal.reason), { once: true }); });
+    writes++;
+  } });
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  const before = f.store.token;
+  await f.controller.handle('token/refresh'); await entered.promise;
+  await f.controller.handle('cancel');
+  assert.equal(writes, 0);
+  assert.equal(f.store.token, before);
+  assert.equal(f.controller.phase, 'stopped');
+});
+test('reconnect with a saved connector token does not require a management grant', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  f.controller.token = null; f.controller.tokenUntil = 0;
+  await f.controller.handle('resume'); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'waiting-browser');
+  assert.equal(f.controller.snapshot().authorized, false);
+});
+test('stop aborts authorization and a late account list does not restore the grant', async t => {
+  const api = fakeCloudflare(), entered = deferred(), release = deferred(); let hold = false;
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, fetchImpl: async (url, options) => {
+    if (hold && String(url).includes('/accounts?')) { entered.resolve(); await release.promise; options.signal.throwIfAborted(); }
+    return api.fetchImpl(url, options);
+  } });
+  t.after(() => controller.dispose());
+  hold = true;
+  const reading = assert.rejects(controller.handle('authorize', { token: 'late-management-token-123456' }));
+  await entered.promise;
+  const stopping = controller.handle('stop');
+  await tick();
+  release.resolve();
+  await Promise.all([reading, stopping]);
+  assert.equal(controller.token, null);
+  assert.equal(controller.snapshot().authorized, false);
+  assert.equal(controller.accountList.length, 0);
 });

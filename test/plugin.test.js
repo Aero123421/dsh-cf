@@ -5,12 +5,12 @@ import { mkdtemp, rm, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply } from '../src/index.js';
-import { endpointOf } from '../src/rpc.js';
-import { listen, http } from './helpers.js';
+import { endpointOf, isManagementRequest, rpcRoute } from '../src/rpc.js';
+import { listen, http, freePort } from './helpers.js';
 
 const COOKIE = 'dsh-auth-fixture=ok';
 /** Minimal DSH host: WebServer prefix routes over real loopback HTTP, and Connection's admission fence. */
-async function dshHost(t, { manager } = {}) {
+async function dshHost(t, { manager, config } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-cf-plugin-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const anchor = join(dir, 'runtime/package.json');
   await mkdir(join(dir, 'runtime/node_modules/@deepseek-ai/dsh-app-boot'), { recursive: true });
@@ -34,7 +34,7 @@ async function dshHost(t, { manager } = {}) {
     inject(_deps, callback) { callback({ connection, webServer, effect: ctx.effect }); },
     get: name => ({ connection, webServer, pluginManager: manager })[name],
   };
-  await apply(ctx, { stateDirectory: join(dir, '.dsh-cf') });
+  await apply(ctx, { stateDirectory: join(dir, '.dsh-cf'), ...config });
   const dispose = async () => { for (const d of disposers.splice(0).reverse()) await d(); };
   t.after(dispose);
   const call = (endpoint, { payload = {}, method = endpoint, headers = {}, body } = {}) => http(port, { path: `/dsh-cf/${endpoint}`, method: 'POST', headers: { host: `127.0.0.1:${port}`, cookie: COOKIE, 'content-type': 'application/json', ...headers }, body: body ?? JSON.stringify({ type: 'client-request', rpcId: 'rpc-1', method, payload }) });
@@ -106,4 +106,34 @@ test('actual updater RPC preserves disabled state and busy responses while cloud
   assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(join(f.dir, '.dsh-cf-updates/latest.json'), 'utf8')).id, id);
   const after = JSON.parse((await f.call('status')).body).result.value;
   for (const key of ['instanceId', 'setup', 'resources', 'autoConnect', 'gatePort', 'binary', 'steps']) assert.deepEqual(after[key], before[key]);
+});
+test('management authority is the peer address; Host and forwarding headers cannot grant it', () => {
+  const req = (address, host, extra = {}) => ({ socket: address === undefined ? {} : { remoteAddress: address }, headers: { host, ...extra } });
+  assert.equal(isManagementRequest(req('203.0.113.8', '127.0.0.1:8787')), false);
+  assert.equal(isManagementRequest(req('127.0.0.1', 'dsh.example.com')), false);
+  assert.equal(isManagementRequest(req('127.0.0.1', 'localhost:8787', { 'x-forwarded-host': 'evil.example.com' })), false);
+  assert.equal(isManagementRequest(req(undefined, '127.0.0.1')), false);
+  assert.equal(isManagementRequest(req('::ffff:127.0.0.1', 'localhost')), true);
+  assert.equal(isManagementRequest(req('::1', '[::1]:8787')), true);
+  assert.equal(isManagementRequest(req('203.0.113.8', 'evil.example.com@127.0.0.1')), false);
+  assert.equal(isManagementRequest(req('127.0.0.1', '127.0.0.1@evil.example.com')), false);
+});
+test('oauth/attempt is refused without a management peer and status omits the authorization URL', async t => {
+  const sent = [];
+  const route = rpcRoute({ requestRejection: () => undefined }, async () => { sent.push('handle'); return { ok: true, value: { authorizationUrl: 'http://secret.example/callback' } }; });
+  const res = { status: 0, body: '', headersSent: false, writeHead(status) { this.status = status; this.headersSent = true; }, end(body = '') { this.body = body; }, setHeader() {} };
+  await route.handler({ url: '/dsh-cf/oauth/attempt', method: 'POST', headers: { host: '127.0.0.1:9', 'content-type': 'application/json' }, socket: { remoteAddress: '203.0.113.9' } }, res);
+  assert.equal(res.status, 403);
+  assert.equal(res.body.includes('secret'), false);
+  assert.equal(sent.length, 0);
+  const f = await dshHost(t, { config: { oauthCallbackPort: await freePort() } });
+  const started = JSON.parse((await f.call('oauth/start', { payload: { clientId: 'public-client-12345', scopes: ['registered.scope'] } })).body).result;
+  assert.equal(started.ok, true);
+  const status = await f.call('status');
+  assert.equal(status.body.includes('code_challenge'), false);
+  assert.equal(status.body.includes('code_verifier'), false);
+  assert.equal(status.body.includes(started.value.authorizationUrl), false);
+  const attempt = JSON.parse((await f.call('oauth/attempt')).body).result.value;
+  assert.equal(attempt.authorizationUrl, started.value.authorizationUrl);
+  assert.equal(attempt.phase, 'waiting');
 });

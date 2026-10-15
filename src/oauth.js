@@ -17,9 +17,9 @@ export class OAuth {
     demand(Array.isArray(scopes) && scopes.length > 0 && scopes.every(s => typeof s === 'string' && /^[A-Za-z0-9._-]{1,180}$/.test(s)), 'OAUTH_SCOPES', 'Enter the exact scope IDs registered for this OAuth client.');
     demand(!scopes.some(s => s === 'offline_access' || s === 'offline'), 'OAUTH_SCOPES', 'Persistent refresh grants are not requested by this plugin.');
     demand(Number.isInteger(port) && port >= 1024 && port <= 65535, 'OAUTH_PORT', 'Choose a loopback callback port between 1024 and 65535.');
-    const generation = ++this.generation;
+    const attempt = ++this.generation;
     await this.clearAttempt();
-    demand(generation === this.generation, 'OAUTH_EXPIRED', 'This authorization was superseded or cancelled.');
+    demand(attempt === this.generation, 'OAUTH_EXPIRED', 'This authorization was superseded or cancelled.');
     const verifier = nonce(); const state = nonce();
     const redirectUri = `http://127.0.0.1:${port}/dsh-cf/oauth/callback`;
     const server = createServer((req, res) => {
@@ -30,7 +30,7 @@ export class OAuth {
       void this.finish(incoming.href).then(() => reply(200, 'Cloudflare connected. Return to DeepSeek Harness.')).catch(() => reply(400, 'Authorization was not completed. Return to DSH and retry.'));
     });
     this.server = server;
-    const pending = { state, verifier, clientId, authorizationId, redirectUri, expires: Date.now() + 5 * 60_000, timer: null, used: false, abort: new AbortController(), server };
+    const pending = { state, verifier, clientId, authorizationId, redirectUri, attempt, expires: Date.now() + 5 * 60_000, timer: null, used: false, abort: new AbortController(), server };
     this.pending = pending; // Own the listener before listen() can yield to cancellation.
     try {
       await new Promise((resolve, reject) => {
@@ -41,27 +41,35 @@ export class OAuth {
         server.listen({ port, host: '127.0.0.1', signal: pending.abort.signal }, () => finish());
       });
       pending.abort.signal.throwIfAborted();
-      demand(generation === this.generation && this.pending === pending, 'OAUTH_EXPIRED', 'This authorization was superseded or cancelled.');
+      demand(attempt === this.generation && this.pending === pending, 'OAUTH_EXPIRED', 'This authorization was superseded or cancelled.');
     } catch (error) {
       if (this.pending === pending) await this.cancel();
       throw error;
     }
-    pending.timer = setTimeout(() => { if (this.pending === pending) { void this.cancel(); this.onState('expired'); } }, 5 * 60_000); pending.timer.unref();
+    pending.timer = setTimeout(() => {
+      if (this.pending !== pending) return;
+      void this.cancel().then(() => this.onState('expired', { attempt }));
+    }, 5 * 60_000); pending.timer.unref();
     const url = new URL(AUTH);
     for (const [key, value] of Object.entries({ response_type: 'code', client_id: clientId, redirect_uri: redirectUri, scope: scopes.join(' '), state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' })) url.searchParams.set(key, value);
-    this.onState('waiting');
-    return { authorizationUrl: url.href, redirectUri, expiresAt: this.pending.expires };
+    this.onState('waiting', { attempt, expiresAt: pending.expires });
+    return { authorizationUrl: url.href, redirectUri, expiresAt: pending.expires, attempt, phase: 'waiting' };
   }
   async finish(redirectUrl) {
     demand(typeof redirectUrl === 'string' && redirectUrl.length < 16_384, 'OAUTH_CALLBACK', 'Paste the complete callback URL from the authorization attempt.');
     const pending = this.pending;
-    demand(pending && !pending.used && Date.now() < pending.expires, 'OAUTH_EXPIRED', 'This authorization has expired or was already used. Start again.');
+    if (!pending || pending.used || Date.now() >= pending.expires) {
+      if (pending && this.generation === pending.attempt) this.onState('expired', { attempt: pending.attempt, failure: 'OAUTH_EXPIRED' });
+      throw new CfError('OAUTH_EXPIRED', 'This authorization has expired or was already used. Start again.');
+    }
     let url; try { url = new URL(redirectUrl); } catch { throw new CfError('OAUTH_CALLBACK', 'Invalid callback URL.'); }
     const expected = new URL(pending.redirectUri);
     demand(url.origin === expected.origin && url.pathname === expected.pathname && !url.hash && !url.username && !url.password, 'OAUTH_CALLBACK', 'Callback destination does not match this attempt.');
     demand(url.searchParams.getAll('state').length === 1 && equal(url.searchParams.get('state'), pending.state), 'OAUTH_STATE', 'Authorization state mismatch.');
+    const attempt = pending.attempt;
     pending.used = true; clearTimeout(pending.timer);
     try {
+      this.onState('exchanging', { attempt });
       demand(!url.searchParams.has('error'), 'OAUTH_DENIED', 'Cloudflare authorization was declined.');
       const code = url.searchParams.get('code');
       demand(url.searchParams.getAll('code').length === 1 && typeof code === 'string' && code.length > 0, 'OAUTH_CALLBACK', 'The authorization code is missing.');
@@ -80,7 +88,15 @@ export class OAuth {
       pending.abort.signal.throwIfAborted();
       // A public client identifies itself at the revocation endpoint (RFC 7009 §2.1).
       this.grantClientId = pending.clientId;
-      this.onState('complete'); return { connected: true };
+      this.onState('complete', { attempt }); return { connected: true, phase: 'complete', attempt };
+    } catch (error) {
+      // A newer attempt or an explicit cancel owns the visible state. This failure must not replace it.
+      if (this.generation === attempt) {
+        const code = error?.code;
+        const phase = code === 'OAUTH_DENIED' ? 'denied' : code === 'OAUTH_EXPIRED' ? 'expired' : 'error';
+        this.onState(phase, { attempt, failure: typeof code === 'string' ? code : 'OAUTH_ERROR' });
+      }
+      throw error;
     } finally {
       if (this.pending === pending) this.pending = null;
       // close() does not wait for the callback response to finish (avoids a self-deadlock).
@@ -95,8 +111,10 @@ export class OAuth {
     demand(response.ok, 'OAUTH_REVOKE', 'Cloudflare did not confirm grant revocation. The local grant can still be forgotten.');
   }
   async cancel() {
+    const attempt = this.pending?.attempt ?? null;
     this.generation++;
     await this.clearAttempt();
+    return attempt;
   }
   async clearAttempt() {
     const pending = this.pending; this.pending = null;
