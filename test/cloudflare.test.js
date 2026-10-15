@@ -280,3 +280,96 @@ test('a tunnel token is replaced only after a valid read of the owned tunnel', a
   assert.equal(await readFile(join(dir, 'tunnel.token'), 'utf8'), next);
   assert.equal(store.state.owned.tunnelId, TUNNEL);
 });
+
+test('Access-only sign-in requires explicit false, validates input and does not require organization WebAuthn', async () => {
+  const f = make(); delete f.data.organization.mfa_config;
+  await assert.rejects(f.cf.validateSetup(SETUP), { code: 'MFA_UNKNOWN' });
+  for (const requireWebAuthn of ['false', 0, null]) {
+    await assert.rejects(f.cf.validateSetup({ ...SETUP, requireWebAuthn }), { code: 'MFA_MODE' });
+  }
+  const setup = await f.cf.validateSetup({ ...SETUP, requireWebAuthn: false });
+  await provision(f.cf, f.store, setup, 4000);
+  assert.deepEqual(f.data.apps[0].mfa_config, { mfa_disabled: true });
+  assert.deepEqual(f.data.policies.get('app-1')[0].include, [{ email: { email: SETUP.ownerEmail } }]);
+  assert.equal(f.data.apps[0].session_duration, '1h');
+  assert(f.store.state.owned.audience);
+  assert.equal(f.data.writes.some(w => w.p.endsWith('/access/organizations')), false);
+  assert.equal(f.store.state.setup.requireWebAuthn, false);
+  await validateAccess(f.cf, setup, f.store.state.owned, f.store.state.instanceId);
+  f.data.apps[0].allowed_idps = ['other-provider'];
+  await assert.rejects(validateAccess(f.cf, setup, f.store.state.owned, f.store.state.instanceId), { code: 'IDP_CHANGED' });
+});
+
+test('Access-only mode still rejects bypass policies, another owner and mismatched MFA settings', async () => {
+  for (const change of ['bypass', 'owner', 'mfa', 'policyMfa']) {
+    const f = make(), setup = { ...SETUP, requireWebAuthn: false };
+    await provision(f.cf, f.store, setup, 4000);
+    const policy = f.data.policies.get('app-1')[0];
+    if (change === 'bypass') policy.decision = 'bypass';
+    if (change === 'owner') policy.include[0].email.email = 'other@example.com';
+    if (change === 'mfa') f.data.apps[0].mfa_config.mfa_disabled = false;
+    if (change === 'policyMfa') policy.mfa_config = { mfa_disabled: false, allowed_authenticators: ['totp'] };
+    await assert.rejects(validateAccess(f.cf, setup, f.store.state.owned, f.store.state.instanceId));
+  }
+});
+
+test('an explicit mode change reuses only the owned app, Tunnel and DNS and clears earlier verification', async () => {
+  const f = make();
+  await provision(f.cf, f.store, SETUP, 4000);
+  const ids = { ...f.store.state.owned }, organization = structuredClone(f.data.organization);
+  f.store.state.proven = true; f.store.state.autoConnect = true; f.store.state.lastVerifiedAt = 'old';
+  const setup = await f.cf.validateSetup({ ...SETUP, requireWebAuthn: false });
+  const before = f.data.writes.length;
+  await provision(f.cf, f.store, setup, 4000);
+  const writes = f.data.writes.slice(before);
+  assert.equal(writes.length, 1); assert.equal(writes[0].method, 'PUT'); assert(writes[0].p.endsWith('/access/apps/app-1'));
+  assert.deepEqual(f.store.state.owned, ids); assert.deepEqual(f.data.organization, organization);
+  assert.equal(f.store.state.setup.requireWebAuthn, false); assert.equal(f.store.state.pending, null);
+  assert.equal(f.store.state.proven, false); assert.equal(f.store.state.autoConnect, false); assert.equal(f.store.state.lastVerifiedAt, null);
+  await provision(f.cf, f.store, { ...SETUP, requireWebAuthn: true }, 4000);
+  assert.equal(f.data.apps[0].mfa_config.mfa_disabled, false);
+  assert.equal(f.store.state.setup.requireWebAuthn, true);
+});
+
+test('unrelated setup changes and pre-existing policy overrides cannot be changed with the mode', async () => {
+  for (const other of ['owner', 'override']) {
+    const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+    const setup = { ...SETUP, requireWebAuthn: false };
+    if (other === 'owner') setup.ownerEmail = 'other@example.com';
+    else f.data.policies.get('app-1')[0].mfa_config = { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'] };
+    const before = f.data.writes.length;
+    await assert.rejects(provision(f.cf, f.store, setup, 4000));
+    assert.equal(f.data.writes.length, before); assert.deepEqual(f.store.state.setup, SETUP);
+  }
+});
+
+test('lost mode-change response blocks retries and never records a successful authentication change', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  const setup = { ...SETUP, requireWebAuthn: false };
+  f.data.fail = ({ method, p }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) throw new Error('connection lost'); };
+  await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'CF_NETWORK' });
+  assert.equal(f.store.state.pending.kind, 'authentication'); assert.deepEqual(f.store.state.setup, SETUP);
+  const before = f.data.writes.length;
+  f.data.fail = null;
+  await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'WRITE_UNKNOWN' });
+  assert.equal(f.data.writes.length, before);
+});
+
+test('mode-change readback failures remain pending even if readback returns 403', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  let updated = false;
+  f.data.fail = ({ method, p }) => {
+    if (method === 'PUT' && p.endsWith('/access/apps/app-1')) updated = true;
+    if (updated && method === 'GET' && p.endsWith('/access/apps/app-1')) return Response.json({ success: false }, { status: 403 });
+  };
+  await assert.rejects(provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000), { code: 'CF_403' });
+  assert.equal(f.store.state.pending.kind, 'authentication'); assert.deepEqual(f.store.state.setup, SETUP);
+});
+
+test('mode-change rejected writes preserve the previous setup and clear only the pending write', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  f.data.fail = ({ method, p }) => method === 'PUT' && p.endsWith('/access/apps/app-1') ? Response.json({ success: false }, { status: 403 }) : null;
+  await assert.rejects(provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000), { code: 'CF_403' });
+  assert.equal(f.store.state.pending, null); assert.deepEqual(f.store.state.setup, SETUP);
+  assert.equal(f.data.apps[0].mfa_config.mfa_disabled, false);
+});

@@ -230,7 +230,7 @@ export class Controller {
       }
       gate.verify = await this.deps.accessVerifier({ ...setup, audience: s.owned.audience });
       gate.enabled = resume && s.proven === true;
-      this.step('access', 'done', resume ? `Owner/JWT gate active; Cloudflare configuration last checked ${s.lastConfigurationCheck || 'during setup'}` : 'Owner-only Access and WebAuthn policy verified');
+      this.step('access', 'done', resume ? `Owner/JWT gate active; Cloudflare configuration last checked ${s.lastConfigurationCheck || 'during setup'}` : setup.requireWebAuthn === false ? 'Owner-only Access sign-in policy verified' : 'Owner-only Access and WebAuthn policy verified');
       this.step('tunnel', 'working', 'Waiting for cloudflared registration');
       const connector = new this.deps.Connector(status => this.onConnectorStatus(connector, status));
       this.connector = connector; this.connectorStatus = 'starting';

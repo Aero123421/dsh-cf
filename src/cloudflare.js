@@ -4,6 +4,9 @@ import { parseConnectorToken } from './store.js';
 const API = 'https://api.cloudflare.com/client/v4';
 const PER_PAGE = 50;
 const MFA = { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'], session_duration: '1h' };
+// Older saved setups have no flag and must retain their WebAuthn requirement.
+export const requiresWebAuthn = setup => setup.requireWebAuthn !== false;
+const appMfa = setup => requiresWebAuthn(setup) ? MFA : { mfa_disabled: true };
 const DURATION = /^(?:0|[1-9]\d*)[mh]$/;
 /**
  * The organization API exposes AMR matching as optional duration configuration.
@@ -104,13 +107,17 @@ export class Cloudflare {
   }
   async validateSetup(input, signal) {
     const setup = { accountId: cfId(input.accountId), zoneId: cfId(input.zoneId), hostname: hostname(input.hostname), ownerEmail: email(input.ownerEmail), idpId: input.idpId };
+    demand(input.requireWebAuthn === undefined || typeof input.requireWebAuthn === 'boolean', 'MFA_MODE', 'Choose whether additional WebAuthn is required.');
+    if (input.requireWebAuthn !== undefined) setup.requireWebAuthn = input.requireWebAuthn;
     demand(typeof setup.idpId === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(setup.idpId), 'IDP', 'Choose one existing Access identity provider.');
     const [zone, account] = await Promise.all([this.get(`/zones/${id(setup.zoneId)}`, signal), this.account(setup.accountId, signal)]);
     demand(zone.account?.id === setup.accountId && zone.status === 'active', 'ZONE', 'Select an active DNS zone belonging to this account.');
     demand(setup.hostname.endsWith(`.${zone.name}`), 'ZONE', 'Use a dedicated subdomain inside the selected zone, not its apex.');
     demand(account.idps.some(x => x.id === setup.idpId), 'IDP', 'The identity provider does not belong to this account.');
-    demandIndependentMfa({ state: account.mfa, missing: account.mfaMissing });
-    demand(account.mfaMissing.length === 0, 'MFA_REQUIRED', 'Enable biometrics and security keys in Access first, using the reviewed shared-settings action.');
+    if (requiresWebAuthn(setup)) {
+      demandIndependentMfa({ state: account.mfa, missing: account.mfaMissing });
+      demand(account.mfaMissing.length === 0, 'MFA_REQUIRED', 'Enable biometrics and security keys in Access first, using the reviewed shared-settings action.');
+    }
     setup.teamDomain = account.teamDomain; return setup;
   }
 }
@@ -122,19 +129,25 @@ function overlaps(domain, host) {
 export async function validateAccess(cf, setup, owned, instanceId, signal) {
   const base = `/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}`;
   const [organization, app, policies] = await Promise.all([
-    cf.get(`/accounts/${id(setup.accountId)}/access/organizations`, signal),
+    requiresWebAuthn(setup) ? cf.get(`/accounts/${id(setup.accountId)}/access/organizations`, signal) : null,
     cf.get(base, signal),
     cf.list(`${base}/policies`, signal),
   ]);
-  demandIndependentMfa(mfaAssurance(organization));
+  if (requiresWebAuthn(setup)) demandIndependentMfa(mfaAssurance(organization));
   demand(app.name === `dsh-cf-${instanceId}` && app.domain === setup.hostname && app.type === 'self_hosted' && /^[a-f0-9]{64}$/i.test(app.aud), 'ACCESS_CHANGED', 'The owned Access application no longer matches this instance.');
   demand(!owned.audience || app.aud === owned.audience, 'ACCESS_CHANGED', 'The Access audience changed. Re-enrollment is required.');
-  demand(app.mfa_config?.mfa_disabled === false && exact([...(app.mfa_config.allowed_authenticators ?? [])].sort(), ['biometrics', 'security_key']), 'MFA_CHANGED', 'The application must require WebAuthn biometrics/security keys only.');
+  if (requiresWebAuthn(setup)) {
+    demand(app.mfa_config?.mfa_disabled === false && exact([...(app.mfa_config.allowed_authenticators ?? [])].sort(), ['biometrics', 'security_key']), 'MFA_CHANGED', 'The application must require WebAuthn biometrics/security keys only.');
+  } else {
+    demand(app.mfa_config?.mfa_disabled === true, 'MFA_CHANGED', 'The application no longer matches the selected Access sign-in mode.');
+  }
   demand(app.allowed_idps?.length === 1 && app.allowed_idps[0] === setup.idpId, 'IDP_CHANGED', 'The Access identity-provider restriction changed.');
   demand(policies.length === 1, 'POLICY_CHANGED', 'Unexpected Access policies. No automatic overwrite was attempted.');
   const policy = policies[0];
-  if (policy.mfa_config) demand(policy.mfa_config.mfa_disabled === false && exact([...(policy.mfa_config.allowed_authenticators ?? [])].sort(), ['biometrics', 'security_key']), 'MFA_CHANGED', 'A policy override weakened WebAuthn. It was not overwritten.');
-  demand(policy.decision === 'allow' && policy.include?.length === 1 && policy.include[0].email?.email?.toLowerCase() === setup.ownerEmail && !(policy.require?.length) && !(policy.exclude?.length) && policy.mfa_config?.mfa_disabled !== true, 'POLICY_CHANGED', 'The Access policy is not the expected owner-only policy.');
+  if (policy.mfa_config) demand(requiresWebAuthn(setup)
+    ? policy.mfa_config.mfa_disabled === false && exact([...(policy.mfa_config.allowed_authenticators ?? [])].sort(), ['biometrics', 'security_key'])
+    : policy.mfa_config.mfa_disabled === true, 'MFA_CHANGED', 'A policy override changed the selected authentication mode. It was not overwritten.');
+  demand(policy.decision === 'allow' && policy.include?.length === 1 && policy.include[0].email?.email?.toLowerCase() === setup.ownerEmail && !(policy.require?.length) && !(policy.exclude?.length), 'POLICY_CHANGED', 'The Access policy is not the expected owner-only policy.');
   demand(!app.destinations?.some(d => d.overrides?.some(o => o.behavior === 'public')), 'POLICY_CHANGED', 'Public Access bypass overrides are not supported.');
   return app;
 }
@@ -160,7 +173,29 @@ function acceptedConnectorToken(raw, accountId, tunnelId) {
 export async function provision(cf, store, setup, gatePort, signal, progress = () => {}) {
   const s = store.state; const owned = s.owned; const marker = `dsh-cf-${s.instanceId}`;
   demand(!s.pending, 'WRITE_UNKNOWN', 'A previous Cloudflare write has an unknown result. Inspect the pending record and Cloudflare resources before retrying; no duplicate was created.');
-  if (s.setup) demand(exact(s.setup, setup), 'SETUP_CHANGED', 'Remove this instance’s existing public configuration before changing its account, hostname, owner, or IdP.');
+  if (s.setup) {
+    const { requireWebAuthn: previousMode, ...previous } = s.setup;
+    const { requireWebAuthn: nextMode, ...next } = setup;
+    demand(exact(previous, next), 'SETUP_CHANGED', 'Remove this instance’s existing public configuration before changing its account, hostname, owner, or IdP.');
+    if (requiresWebAuthn(s.setup) !== requiresWebAuthn(setup)) {
+      demand(owned.appId, 'SETUP_CHANGED', 'Finish or remove the existing setup before changing its authentication mode.');
+      const app = await validateAccess(cf, s.setup, owned, s.instanceId, signal);
+      const path = `/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}`;
+      const policies = await cf.list(`${path}/policies`, signal);
+      demand(policies.every(policy => !policy.mfa_config), 'MFA_CHANGED', 'An existing policy overrides MFA. It was not changed automatically.');
+      signal?.throwIfAborted();
+      s.pending = { kind: 'authentication', path, marker, at: new Date().toISOString() }; await store.save();
+      try {
+        await cf.call('PUT', path, { ...app, mfa_config: appMfa(setup) }, signal);
+      } catch (error) {
+        if (error instanceof CfError && /^CF_4\d\d$/.test(error.code)) { s.pending = null; await store.save(); }
+        throw error;
+      }
+      await validateAccess(cf, setup, owned, s.instanceId, signal);
+      s.setup = setup; s.pending = null; s.proven = false; s.autoConnect = false;
+      s.lastVerifiedAt = null; s.lastConfigurationCheck = null; await store.save();
+    }
+  }
   const [records, apps] = await Promise.all([
     cf.list(`/zones/${id(setup.zoneId)}/dns_records?name=${id(setup.hostname)}`, signal),
     cf.list(`/accounts/${id(setup.accountId)}/access/apps`, signal),
@@ -182,7 +217,7 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
   progress('access');
   if (!owned.appId) {
     await writeNew('access', `/accounts/${id(setup.accountId)}/access/apps`, {
-      name: marker, type: 'self_hosted', domain: setup.hostname, allowed_idps: [setup.idpId], session_duration: '1h', mfa_config: MFA,
+      name: marker, type: 'self_hosted', domain: setup.hostname, allowed_idps: [setup.idpId], session_duration: '1h', mfa_config: appMfa(setup),
       policies: [{ name: `${marker}-owner`, decision: 'allow', precedence: 1, include: [{ email: { email: setup.ownerEmail } }], require: [], exclude: [] }],
     }, async app => { demand(typeof app?.id === 'string', 'CF_CREATE', 'Cloudflare returned no Access application ID.'); owned.appId = app.id; });
   }
