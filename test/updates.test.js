@@ -9,7 +9,7 @@ import { Updates, compareVersions, checkedCandidate, supportsSource, dshPeerSati
 import manifest from '../package.json' with { type: 'json' };
 const PROFILE_KEY = 'a'.repeat(64);
 const RUNTIME = '0.2.1-alpha.2', REPO = 'Aero123421/dsh-cf';
-const NEXT = '0.1.0-alpha.6';
+const NEXT = '0.1.0-alpha.7';
 function release(version, id = 1) { return { id, tag_name: 'v'+version, draft: false, prerelease: version.includes('-'), html_url: `https://github.com/${REPO}/releases/tag/v${version}`, body: 'Release notes', assets: [] }; }
 const DSH_RANGE = '>=0.2.1-alpha.2 <0.3.0-0';
 function pkg(version = NEXT, peer = RUNTIME) {

@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtemp, rm, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { VERSION } from '../src/updates.js';
 import { apply } from '../src/index.js';
 import { endpointOf, isManagementRequest, rpcRoute } from '../src/rpc.js';
 import { listen, http, freePort } from './helpers.js';
@@ -82,10 +83,10 @@ test('updater routes require the original management peer, Host and Origin after
   const result = JSON.parse((await f.call('update-status')).body).result;
   assert.equal(result.ok, true); assert.equal(result.value.status, 'unavailable'); assert.equal(result.value.reason, 'UPDATE_MANAGER'); assert.equal(result.value.dshVersion, '0.2.1-alpha.2');
   const status = JSON.parse((await f.call('status')).body).result.value;
-  assert.equal(status.version, '0.1.0-alpha.5'); assert.equal(status.phase, 'idle');
+  assert.equal(status.version, VERSION); assert.equal(status.phase, 'idle');
 });
 test('actual updater RPC preserves disabled state and busy responses while cloud state stays unchanged', async t => {
-  const version = '0.1.0-alpha.6'; let complete, entered;
+  const version = '0.1.0-alpha.7'; let complete, entered;
   const started = new Promise(resolve => { entered = resolve; });
   const calls = [], bundle = { name: 'dsh-cf', installed: true, enabled: false, version: '0.1.0-alpha.5', source: 'github:Aero123421/dsh-cf#v0.1.0-alpha.5' };
   const manager = { listBundles: async () => [bundle], waitForInstall: async () => null, installBundle: async (spec, options) => { calls.push({ spec, options }); entered(); return new Promise(resolve => { complete = resolve; }); } };
