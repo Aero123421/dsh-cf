@@ -30,6 +30,8 @@ Original authenticated DSH callers can manage the plugin. The public gate permit
 
 ## Streams, cookies, and revocation
 
+A normal GET of the public homepage now performs owner verification automatically: the Access JWT is validated first, then the regular DSH cookie exchange completes over loopback before application traffic is enabled. A separate nonce-bearing verification link is no longer required in the UI; the existing diagnostic endpoint remains available for diagnostics. API requests and WebSocket upgrades alone cannot initialize an unverified gate. Failed or cancelled exchanges do not enable it.
+
 Every new HTTP/WS request is checked. State-changing HTTP and WS requests require the exact browser Origin. Cross-site GET navigation is allowed only at safe entry/verification documents. Incoming cookies/Authorization/forwarded metadata are not used as DSH credentials. The upstream signed cookie is injected after JWT validation.
 
 Uploads are bounded to 100 MiB, header bytes and concurrency are bounded, streams are forwarded with backpressure. WS/SSE/HTTP streams close on the earlier of JWT expiration or 15 minutes. The plugin does not replay writes after an upstream failure. Stop closes existing sockets and the owned connector. A guardian notices parent IPC loss and terminates its own child after a DSH crash.

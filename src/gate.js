@@ -109,7 +109,14 @@ export class Gate {
         res.end('<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DSH · Access verified</title><body style="font:16px system-ui;max-width:600px;margin:12vh auto;padding:24px;line-height:1.7"><h1>✓ 本人認証を確認しました</h1><p>Cloudflare AccessとDSHの正規セッション交換に成功しました。</p><p>次にDSHを開くと、API・WebSocketの実通信を確認します。</p><a style="display:inline-block;padding:12px 20px;border:1px solid;border-radius:8px" href="/">DSHを開いて接続確認</a><p>設定画面に戻ると、確認済みの項目にチェックが付きます。</p></body></html>');
         return;
       }
-      demand(this.enabled, 'PROOF', 'Complete browser verification from the DSH settings panel first.');
+      if (!this.enabled) {
+        // A normal navigation is the owner proof. Verify Access first, then exchange
+        // the DSH session over loopback before admitting any application traffic.
+        demand(req.method === 'GET' && url.pathname === '/', 'PROOF', 'Open the DSH homepage to sign in.');
+        await this.adapter.cookie(this.host);
+        demand(!this.closing && !res.destroyed && identity.expiresAt > Date.now(), 'AUTH', 'Request expired or stopped.');
+        this.enabled = true;
+      }
       this.onEvidence('owner');
       const length = req.headers['content-length'];
       demand(!length || (/^\d+$/.test(length) && Number(length) <= this.maximumBodyBytes), 'BODY', 'Upload exceeds the request limit.');
@@ -153,6 +160,17 @@ export class Gate {
     } catch (e) {
       if (res.headersSent) return res.destroy();
       const status = e instanceof CfError && e.code === 'BODY' ? 413 : e instanceof CfError && ['HOST', 'ORIGIN', 'PATH', 'MANAGEMENT'].includes(e.code) ? 403 : 401;
+      if (req.method === 'GET' && req.url === '/' && String(req.headers.accept ?? '').includes('text/html') && status === 401) {
+        const localFailure = e instanceof CfError && e.code.startsWith('DSH_');
+        const japanese = String(req.headers['accept-language'] ?? '').startsWith('ja');
+        const title = japanese ? 'DSHを開けませんでした' : 'Could not open DSH';
+        const message = localFailure
+          ? japanese ? 'このPCのDSHとの接続を確認できませんでした。管理用の設定画面から接続し直してください。' : 'The connection to DSH on this PC could not be verified. Reconnect from the local settings.'
+          : japanese ? 'Cloudflareのログインを確認できませんでした。許可されたメールアドレスでログインし直してください。' : 'Cloudflare sign-in could not be verified. Sign in again with the allowed email address.';
+        res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'", 'x-dsh-cf-gate': this.instanceId });
+        res.end(`<!doctype html><html lang="${japanese ? 'ja' : 'en'}"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><body style="font:16px system-ui;max-width:540px;margin:12vh auto;padding:24px;line-height:1.7"><h1>${title}</h1><p>${message}</p>${localFailure ? '' : `<p><a href="/cdn-cgi/access/logout">${japanese ? 'ログインし直す' : 'Sign in again'}</a></p>`}</body></html>`);
+        return;
+      }
       denied(res, status, status === 403 ? 'Request not permitted.' : 'Access or DSH verification required.', this.instanceId);
     } finally { admitted(); }
   }
