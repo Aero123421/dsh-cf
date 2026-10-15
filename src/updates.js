@@ -30,13 +30,17 @@ export function compareVersions(left, right) {
   }
   return 0;
 }
-const WORKSPACE_RANGE = new Set(['workspace:^', 'workspace:~', 'workspace:*']);
-/** Same predicate as DSH app-boot `evaluatePluginCompatibility`: prereleases count, and `workspace:^` / `workspace:~` / `workspace:*` mean the running version. Blank or invalid ranges are incompatible. */
+/** Prereleases count, as in DSH app-boot. The updater also refuses `workspace:` specs and any range with no upper bound (`*`, `x`, `>=0`, a bare `>=`). */
+function boundedPeerRange(range) {
+  if (typeof range !== 'string' || range.includes('workspace:')) return false;
+  let parsed;
+  try { parsed = new semver.Range(range, { includePrerelease: true }); }
+  catch { return false; }
+  return parsed.set.length > 0 && parsed.set.every(comparators => comparators.some(comparator => comparator.operator === '<' || comparator.operator === '<=' || (comparator.operator === '' && typeof comparator.semver?.version === 'string')));
+}
 export function dshPeerSatisfies(version, range) {
-  if (typeof version !== 'string' || typeof range !== 'string' || semver.valid(version) === null) return false;
-  const requirement = WORKSPACE_RANGE.has(range) ? version : range;
-  if (requirement.trim() === '') return false;
-  try { return semver.satisfies(version, requirement, { includePrerelease: true }); }
+  if (typeof version !== 'string' || semver.valid(version) === null || !boundedPeerRange(range)) return false;
+  try { return semver.satisfies(version, range, { includePrerelease: true }); }
   catch { return false; }
 }
 function object(value) { demand(value && typeof value === 'object' && !Array.isArray(value), 'UPDATE_METADATA', 'リリース情報を確認できません。'); return value; }
@@ -85,7 +89,7 @@ export async function checkedCandidate(channel, runtime, fetcher = fetch, signal
   demand(pkg.name === 'dsh-cf' && pkg.version === candidate.version && object(object(pkg.dsh).bundle).patch === './cordis.patch.yml' && pkg.exports?.['.'] === './src/index.js' && pkg.exports?.['./client'] === './src/client.js', 'UPDATE_METADATA', '対象プラグインと版を確認できません。');
   const peers = object(pkg.peerDependencies), ranges = Object.entries(peers).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'));
   demand(runtime && ranges.length && typeof peers['@deepseek-ai/dsh'] === 'string', 'UPDATE_COMPATIBILITY', '対応DSHの版を確認できません。手動更新先を確認してください。');
-  // Same predicate as DSH app-boot evaluatePluginCompatibility, including ^, ~, x-ranges, *, and workspace protocols.
+  // Bounded ranges only. DSH boot still accepts `*`, `x`, `>=0`, and workspace protocols; this updater does not.
   for (const [, range] of ranges) demand(typeof range === 'string' && dshPeerSatisfies(runtime, range), 'UPDATE_COMPATIBILITY', 'このリリースは使用中のDSHに対応していません。');
   return { candidate: { ...candidate, runtime }, status: 'available' };
 }

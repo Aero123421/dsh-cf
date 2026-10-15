@@ -239,7 +239,7 @@ test('upstream 503 and 401 are faults, while success and gate shutdown are not',
   assert.equal(faults.length, 0);
   const down = await http(f.gate.port, { path: '/api/down', headers });
   assert.equal(down.status, 503);
-  assert.deepEqual(faults.at(-1), { status: 'upstream-failed', channel: 'api' });
+  assert.deepEqual(faults.at(-1), { status: 'upstream-failed', channel: 'api', httpStatus: 503 });
   assert.equal(f.evidence.includes('api'), false);
   const denied = await http(f.gate.port, { path: '/api/fail', method: 'POST', headers, body: 'once' });
   assert.equal(denied.status, 401);
@@ -247,6 +247,18 @@ test('upstream 503 and 401 are faults, while success and gate shutdown are not',
   const beforeClose = faults.length;
   await f.gate.close();
   assert.equal(faults.length, beforeClose);
+});
+test('a later HTTP 5xx is forwarded without removing the earlier successful check', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event) });
+  await f.activate();
+  assert.equal((await http(f.gate.port, { headers })).status, 200);
+  assert.equal(f.evidence.includes('http'), true);
+  const down = await http(f.gate.port, { path: '/down', headers });
+  assert.equal(down.status, 503);
+  assert.equal(down.body, 'unavailable');
+  assert.deepEqual(faults.filter(event => event.channel === 'http'), [{ status: 'upstream-failed', channel: 'http', httpStatus: 503 }]);
+  assert.equal(f.evidence.includes('http'), true);
 });
 test('WebSocket end and the stream lifetime are not upstream failures', async t => {
   const faults = [];

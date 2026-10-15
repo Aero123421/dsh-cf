@@ -284,12 +284,27 @@ test('oauth phases stay on the host and status never carries the authorization U
   assert.equal(controller.snapshot().oauth.failure, 'OAUTH_EXCHANGE');
   assert.equal(JSON.stringify(controller.snapshot()).includes(again.authorizationUrl), false);
 });
+test('a 5xx before a channel succeeds is not stored as evidence', async t => {
+  const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'waiting-browser');
+  f.gate.onFault({ status: 'upstream-failed', channel: 'http', httpStatus: 503 });
+  assert.equal(f.controller.phase, 'degraded');
+  assert.equal(f.controller.error.code, 'DSH_UPSTREAM');
+  assert.equal(f.controller.evidence.http, false);
+  assert.notEqual(f.store.state.proven, true);
+});
 test('an upstream failure is not success, and reconnect does not restore ready without new DSH traffic', async t => {
   const f = await fixture(t); await f.controller.handle('start', SETUP); await f.controller.operation.promise;
   for (const kind of ['owner', 'http', 'api', 'websocket']) f.gate.onEvidence(kind);
   assert.equal(f.controller.phase, 'ready');
   const verified = f.store.state.lastVerifiedAt;
   assert.equal(typeof verified, 'string');
+  f.gate.onFault({ status: 'upstream-failed', channel: 'http', httpStatus: 503 });
+  assert.equal(f.controller.phase, 'ready');
+  assert.equal(f.controller.evidence.http, true);
+  assert.equal(f.controller.error, null);
+  assert.equal(f.store.state.proven, true);
+  assert.equal(f.store.state.lastVerifiedAt, verified);
   f.gate.onFault({ status: 'upstream-failed', channel: 'http' });
   assert.equal(f.controller.phase, 'degraded');
   assert.equal(f.controller.error.code, 'DSH_UPSTREAM');
@@ -337,11 +352,25 @@ test('token refresh restarts only the connector, and a failed refetch keeps the 
   assert.equal(f.controller.gate.closed, undefined);
   assert.equal(f.store.state.owned.tunnelId, 'tunnel');
   const saved = f.store.token;
+  const current = f.connector;
   await f.controller.handle('token/refresh'); await f.controller.operation.promise;
-  assert.equal(f.controller.phase, 'error');
+  assert.equal(refreshes, 2);
+  assert.equal(f.controller.phase, 'rechecking');
   assert.equal(f.controller.error.code, 'CF_NETWORK');
+  assert.equal(f.controller.gate.closed, undefined);
+  assert.equal(f.connector, current);
+  assert.equal(current.stopped, undefined);
   assert.equal(f.store.token, saved);
   assert.equal(JSON.stringify(f.controller.snapshot()).includes(saved), false);
+});
+test('token refresh does not report success when the profile cannot reconnect', async t => {
+  const f = await fixture(t, { refreshTunnelToken: async () => {} });
+  await f.controller.handle('token/refresh'); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'error');
+  assert.equal(f.controller.error.code, 'SETUP');
+  assert.equal(f.controller.gate, null);
+  assert.equal(f.controller.connector, null);
+  assert.equal(JSON.stringify(f.controller.snapshot()).includes('management-secret'), false);
 });
 test('cancel during token refresh does not write a replacement token', async t => {
   const entered = deferred(); let writes = 0;
@@ -382,4 +411,28 @@ test('stop aborts authorization and a late account list does not restore the gra
   assert.equal(controller.token, null);
   assert.equal(controller.snapshot().authorized, false);
   assert.equal(controller.accountList.length, 0);
+});
+test('stop keeps an OAuth denial, expiry, or exchange failure', async t => {
+  const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} } });
+  t.after(() => controller.dispose());
+  controller.noteOauth('denied', { attempt: 1, failure: 'OAUTH_DENIED' });
+  await controller.stop();
+  assert.equal(controller.phase, 'stopped');
+  assert.equal(controller.snapshot().oauth.phase, 'denied');
+  assert.equal(controller.snapshot().oauth.failure, 'OAUTH_DENIED');
+  controller.noteOauth('error', { attempt: 2, failure: 'OAUTH_EXCHANGE' });
+  await controller.stop();
+  assert.equal(controller.snapshot().oauth.phase, 'error');
+  assert.equal(controller.snapshot().oauth.failure, 'OAUTH_EXCHANGE');
+  let release;
+  controller.operation = { abort: new AbortController(), promise: new Promise(resolve => { release = resolve; }) };
+  controller.noteOauth('waiting', { attempt: 3, expiresAt: Date.now() + 60_000 });
+  const stopping = controller.stop();
+  assert.equal(controller.snapshot().oauth.phase, 'cancelled');
+  controller.noteOauth('expired', { attempt: 3, failure: 'OAUTH_EXPIRED' });
+  release();
+  await stopping;
+  assert.equal(controller.phase, 'stopped');
+  assert.equal(controller.snapshot().oauth.phase, 'expired');
+  assert.equal(controller.snapshot().oauth.failure, 'OAUTH_EXPIRED');
 });

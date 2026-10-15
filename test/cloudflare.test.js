@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Cloudflare, provision, removeOwned, validateAccess } from '../src/cloudflare.js';
-import { ACCOUNT, SETUP, AUD, fakeCloudflare, memoryStore } from './helpers.js';
+import { ACCOUNT, SETUP, AUD, TUNNEL, connectorToken, fakeCloudflare, memoryStore } from './helpers.js';
 import { CfError, safeError } from '../src/common.js';
 const make = () => { const api = fakeCloudflare(); return { ...api, cf: new Cloudflare('test-management-token-123456789', api.fetchImpl), store: memoryStore() }; };
 test('provision builds an owner/WebAuthn app before tunnel and DNS; retry does not duplicate writes', async () => {
@@ -11,7 +11,7 @@ test('provision builds an owner/WebAuthn app before tunnel and DNS; retry does n
   assert.equal(f.data.writes[0].p.split('/').at(-1), 'apps'); assert.equal(f.data.writes.at(-1).p.split('/').at(-1), 'dns_records');
   assert.deepEqual(f.data.apps[0].policies[0].include, [{ email: { email: SETUP.ownerEmail } }]);
   assert.equal(f.data.apps[0].mfa_config.mfa_disabled, false);
-  assert.equal(f.data.configs.get('tunnel-1').config.ingress[0].originRequest.access.required, true);
+  assert.equal(f.data.configs.get(TUNNEL).config.ingress[0].originRequest.access.required, true);
   const count = f.data.writes.length; await provision(f.cf, f.store, setup, 4000); assert.equal(f.data.writes.length, count);
   assert(!JSON.stringify(f.store.saves).includes('test-management-token'));
 });
@@ -73,16 +73,16 @@ test('weaker per-policy MFA override is not accepted', async () => {
 });
 test('changed ingress is refused rather than silently repaired', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000);
-  f.data.configs.get('tunnel-1').config.ingress[0].service = 'http://other.internal:80';
+  f.data.configs.get(TUNNEL).config.ingress[0].service = 'http://other.internal:80';
   await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'TUNNEL_CHANGED' });
 });
 test('changed Tunnel Access team is rejected without overwriting the existing ingress', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000);
-  f.data.configs.get('tunnel-1').config.ingress[0].originRequest.access.teamName = 'another-team';
+  f.data.configs.get(TUNNEL).config.ingress[0].originRequest.access.teamName = 'another-team';
   const writes = f.data.writes.length;
   await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'TUNNEL_CHANGED' });
   assert.equal(f.data.writes.length, writes);
-  assert.equal(f.data.configs.get('tunnel-1').config.ingress[0].originRequest.access.teamName, 'another-team');
+  assert.equal(f.data.configs.get(TUNNEL).config.ingress[0].originRequest.access.teamName, 'another-team');
 });
 test('initial ingress write must read back the requested routing before DNS is created', async () => {
   const f = make();
@@ -92,7 +92,7 @@ test('initial ingress write must read back the requested routing before DNS is c
   await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'TUNNEL_CHANGED' });
   assert.equal(f.store.state.owned.ingressConfigured, undefined);
   assert.equal(f.data.records.length, 0);
-  assert.equal(f.store.saves.at(-1).owned.tunnelId, 'tunnel-1');
+  assert.equal(f.store.saves.at(-1).owned.tunnelId, TUNNEL);
   assert.equal(f.store.saves.at(-1).pending, null);
   f.data.fail = null; await removeOwned(f.cf, f.store);
   assert.deepEqual(f.store.state.owned, {});
@@ -102,7 +102,7 @@ test('an unavailable initial ingress readback retains owned IDs and retry does n
   f.data.fail = ({ p, method }) => { if (method === 'GET' && p.endsWith('/configurations')) throw new Error('readback unavailable'); };
   await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_NETWORK' });
   assert.equal(f.store.state.owned.ingressConfigured, undefined);
-  assert.equal(f.store.saves.at(-1).owned.tunnelId, 'tunnel-1');
+  assert.equal(f.store.saves.at(-1).owned.tunnelId, TUNNEL);
   assert.equal(f.store.state.pending, null);
   f.data.fail = null; await provision(f.cf, f.store, SETUP, 4000);
   assert.equal(f.store.state.owned.ingressConfigured, true);
@@ -141,7 +141,7 @@ test('owned Tunnel connections are cleaned up before the Tunnel is deleted', asy
   const f = make(); await provision(f.cf, f.store, SETUP, 4000); const from = f.data.writes.length;
   await removeOwned(f.cf, f.store);
   const deletes = f.data.writes.slice(from).filter(w => w.method === 'DELETE').map(w => w.p.replace(/^\/accounts\/[a-f0-9]+/, '').replace(/^\/zones\/[a-f0-9]+/, ''));
-  assert.deepEqual(deletes, ['/dns_records/dns-1', '/cfd_tunnel/tunnel-1/connections', '/cfd_tunnel/tunnel-1', '/access/apps/app-1']);
+  assert.deepEqual(deletes, ['/dns_records/dns-1', `/cfd_tunnel/${TUNNEL}/connections`, `/cfd_tunnel/${TUNNEL}`, '/access/apps/app-1']);
   assert.equal(f.data.tunnels.length, 0);
 });
 test('lists use the documented 50-item page size and follow total_pages', async () => {
@@ -175,7 +175,7 @@ test('raw errors and remote response bodies are not exposed in diagnostics', () 
 test('IdP MFA substitution and an unreadable organization block publication without writes', async () => {
   const { mfaAssurance } = await import('../src/cloudflare.js');
   const base = { allowed_authenticators: ['biometrics', 'security_key'] };
-  assert.equal(mfaAssurance({ mfa_config: { ...base } }).state, 'independent');
+  assert.equal(mfaAssurance({ mfa_config: { ...base } }).state, 'unknown');
   assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_enabled: false } }).state, 'independent');
   assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_enabled: true } }).state, 'substitute');
   assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_session_duration: '30m' } }).state, 'substitute');
@@ -185,6 +185,10 @@ test('IdP MFA substitution and an unreadable organization block publication with
   assert.equal(mfaAssurance({ mfa_config: { ...base, amr_matching_enabled: true, amr_matching_session_duration: 5 } }).state, 'unknown');
   assert.equal(mfaAssurance({}).state, 'unknown');
   const f = make();
+  delete f.data.organization.mfa_config.amr_matching_enabled;
+  await assert.rejects(f.cf.validateSetup(SETUP), { code: 'MFA_UNKNOWN' });
+  assert.equal(f.data.writes.length, 0);
+  f.data.organization.mfa_config.amr_matching_enabled = false;
   f.data.organization.mfa_config.amr_matching_session_duration = '30m';
   await assert.rejects(f.cf.validateSetup(SETUP), { code: 'MFA_IDP_SUBSTITUTE' });
   assert.equal(f.data.writes.length, 0);
@@ -223,19 +227,28 @@ test('a tunnel token is replaced only after a valid read of the owned tunnel', a
   const store = await new Store(dir).open();
   t.after(() => store.close());
   const f = make();
-  f.data.tunnels.push({ id: 'tunnel-1', name: `dsh-cf-${store.state.instanceId}` });
+  f.data.tunnels.push({ id: TUNNEL, name: `dsh-cf-${store.state.instanceId}` });
   store.state.setup = { ...SETUP };
-  store.state.owned = { tunnelId: 'tunnel-1' };
-  const original = 'original-connector-token-123456789';
+  store.state.owned = { tunnelId: TUNNEL };
+  const original = connectorToken({ secret: Buffer.from('original-connector-secret') });
   await store.writeToken(original);
-  const next = 'refreshed-connector-token-123456789';
-  f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply(next) : null;
+  const standard = connectorToken({ secret: Buffer.from('secret-0-+/_') });
+  const next = standard.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  assert.notEqual(next, standard);
+  f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply({ token: next }) : null;
   await refreshTunnelToken(f.cf, store);
   assert.equal(await readFile(join(dir, 'tunnel.token'), 'utf8'), next);
-  assert.equal(store.state.owned.tunnelId, 'tunnel-1');
+  assert.equal(store.state.owned.tunnelId, TUNNEL);
   assert.equal(f.data.writes.length, 0);
-  f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply('short') : null;
-  await assert.rejects(refreshTunnelToken(f.cf, store), error => error.code === 'TOKEN' && !error.message.includes('short') && !error.message.includes(next));
+  const rejected = ['short', 'x'.repeat(40), connectorToken({ accountId: 'b'.repeat(32) }), connectorToken({ tunnelId: '22222222-2222-4222-8222-222222222222' })];
+  for (const bad of rejected) {
+    f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply(bad) : null;
+    await assert.rejects(refreshTunnelToken(f.cf, store), error => error.code === 'TOKEN' && !error.message.includes(bad) && !error.message.includes(next) && !error.message.includes('short'));
+    assert.equal(await readFile(join(dir, 'tunnel.token'), 'utf8'), next);
+  }
+  const signal = AbortSignal.abort();
+  f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply(connectorToken({ secret: Buffer.from('cancelled-refresh') })) : null;
+  await assert.rejects(refreshTunnelToken(f.cf, store, signal));
   assert.equal(await readFile(join(dir, 'tunnel.token'), 'utf8'), next);
   f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? Response.json({ success: false }, { status: 500 }) : null;
   await assert.rejects(refreshTunnelToken(f.cf, store), { code: 'CF_500' });
@@ -244,5 +257,5 @@ test('a tunnel token is replaced only after a valid read of the owned tunnel', a
   f.data.fail = null;
   await assert.rejects(refreshTunnelToken(f.cf, store), { code: 'TUNNEL_CHANGED' });
   assert.equal(await readFile(join(dir, 'tunnel.token'), 'utf8'), next);
-  assert.equal(store.state.owned.tunnelId, 'tunnel-1');
+  assert.equal(store.state.owned.tunnelId, TUNNEL);
 });

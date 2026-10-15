@@ -48,8 +48,8 @@ test('DSH peer range includes alpha.2, alpha.3 and later 0.2 prereleases, and ex
   assert.equal(dshPeerSatisfies('0.2.1-alpha.2', '0.2.1-alpha.2'), true);
   assert.equal(dshPeerSatisfies('0.2.1-alpha.3', '0.2.1-alpha.2'), false);
   assert.equal(dshPeerSatisfies('0.2.1-alpha.3', '0.2.1-alpha.2 || >=0.2.1-alpha.3 <0.3.0-0'), true);
-  for (const range of ['^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.x', '0.2.1-alpha.2 - 0.3.0', '*', 'workspace:^', 'workspace:~', 'workspace:*']) assert.equal(dshPeerSatisfies('0.2.1-alpha.3', range), true, range);
-  for (const range of ['', ' ', '~0.2.1', '>=0.2.1-alpha.2 || ^0.2.2.0', 'not a range', 'workspace:foo']) assert.equal(dshPeerSatisfies('0.2.1-alpha.3', range), false, range);
+  for (const range of ['^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.x', '0.2.1-alpha.2 - 0.3.0', '1']) assert.equal(dshPeerSatisfies(range === '1' ? '1.2.3' : '0.2.1-alpha.3', range), true, range);
+  for (const range of ['', ' ', '*', 'x', 'X', '>=0', '>=0.0.0', '>=1.0.0', '>=0.2.1-alpha.2', '* || 1.2.3', '>=0.2.1-alpha.2 || <0.3.0', 'workspace:^', 'workspace:~', 'workspace:*', '1.2.3 || workspace:*', '~0.2.1', '>=0.2.1-alpha.2 || ^0.2.2.0', 'not a range', 'workspace:foo']) assert.equal(dshPeerSatisfies('0.2.1-alpha.3', range), false, range);
   assert.equal(dshPeerSatisfies('0.2.1-alpha.2', '^0.2.1-alpha.2'), true);
   assert.equal(dshPeerSatisfies('0.2.0', '0.2.x'), true);
 });
@@ -62,8 +62,9 @@ test('Invalid metadata, channel mismatch, package identity, compatibility, redir
   const ranged = github(undefined, pkg(NEXT, DSH_RANGE));
   for (const runtime of ['0.2.1-alpha.2', '0.2.1-alpha.3', '0.2.2-alpha.1', '0.2.9-rc.1']) assert.equal((await checkedCandidate('prerelease', runtime, ranged)).candidate.version, NEXT);
   for (const runtime of ['0.2.0-rc.2', '0.2.1-alpha.1', '0.3.0-0', '0.3.0-alpha.1', '0.3.0']) await assert.rejects(checkedCandidate('prerelease', runtime, ranged), { code: 'UPDATE_COMPATIBILITY' });
-  assert.equal((await checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, '^0.2.1-alpha.2')))).status, 'available');
-  assert.equal((await checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, 'workspace:^')))).status, 'available');
+  for (const range of ['^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.x', '0.2.1-alpha.2 - 0.3.0']) assert.equal((await checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, range)))).status, 'available', range);
+  for (const range of ['*', 'x', '>=0', 'workspace:*', 'workspace:^', 'workspace:~']) await assert.rejects(checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, range))), { code: 'UPDATE_COMPATIBILITY' });
+  await assert.rejects(checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, '~0.2.1'))), { code: 'UPDATE_COMPATIBILITY' });
   await assert.rejects(checkedCandidate('prerelease', '0.2.1-alpha.3', github(undefined, pkg(NEXT, { '@deepseek-ai/dsh': DSH_RANGE, '@deepseek-ai/dsh-client': '0.2.1-alpha.2' }))), { code: 'UPDATE_COMPATIBILITY' });
   assert.equal((await checkedCandidate('prerelease', '0.2.1-alpha.2', github(undefined, pkg(NEXT, { '@deepseek-ai/dsh': DSH_RANGE, '@deepseek-ai/dsh-client': '0.2.1-alpha.2' })))).status, 'available');
   assert.equal((await checkedCandidate('prerelease', RUNTIME, github(undefined, pkg(NEXT, { '@deepseek-ai/dsh': DSH_RANGE, '@other/tool': 'broken' })))).status, 'available');

@@ -190,10 +190,14 @@ export class Controller {
     const operation = { id: randomUUID(), abort: new AbortController(), promise: null };
     this.operation = operation; this.error = null; this.changed();
     operation.promise = Promise.resolve().then(() => run(operation.abort.signal)).catch(async error => {
-      await this.closeRuntime();
-      this.phase = operation.abort.signal.aborted ? 'stopped' : 'error';
-      this.error = operation.abort.signal.aborted ? null : safeError(error);
-      for (const step of this.steps) if (step.status === 'working') { step.status = operation.abort.signal.aborted ? 'idle' : 'error'; step.message = this.error?.message || 'Cancelled'; }
+      const keep = error?.preserveRuntime === true && !operation.abort.signal.aborted;
+      if (!keep) await this.closeRuntime();
+      if (keep) this.error = safeError(error);
+      else {
+        this.phase = operation.abort.signal.aborted ? 'stopped' : 'error';
+        this.error = operation.abort.signal.aborted ? null : safeError(error);
+        for (const step of this.steps) if (step.status === 'working') { step.status = operation.abort.signal.aborted ? 'idle' : 'error'; step.message = this.error?.message || 'Cancelled'; }
+      }
     }).finally(() => { if (this.operation === operation) this.operation = null; this.changed(); });
     return { operationId: operation.id };
   }
@@ -302,6 +306,8 @@ export class Controller {
       }
       this.changed(); return;
     }
+    // A later HTTP 5xx on a channel that already succeeded does not undo that check.
+    if (event?.status === 'upstream-failed' && Number.isInteger(event.httpStatus) && event.httpStatus >= 500 && this.evidence[channel] === true) return;
     this.evidence[channel] = false;
     const rejected = event?.status === 'auth-rejected';
     this.reachability = { status: rejected ? 'auth-rejected' : 'upstream-failed', channel };
@@ -343,10 +349,17 @@ export class Controller {
     return { phase, attempt: link.attempt, authorizationUrl: link.authorizationUrl, redirectUri: link.redirectUri, expiresAt: link.expiresAt };
   }
   async refreshAndReconnect(signal) {
-    await this.deps.refreshTunnelToken(this.cf(), this.store, signal);
+    const running = !!(this.gate || this.connector);
+    try { await this.deps.refreshTunnelToken(this.cf(), this.store, signal); }
+    catch (error) {
+      if (!signal.aborted && running && error && typeof error === 'object') error.preserveRuntime = true;
+      throw error;
+    }
     signal.throwIfAborted();
     if (this.gate && this.connector && this.binary) return this.restartConnector(signal);
-    if (this.store.state.setup && this.store.state.lastConfigurationCheck && !this.store.state.pending && await this.store.hasToken()) return this.start({}, signal, true);
+    const state = this.store.state;
+    if (state.setup && state.lastConfigurationCheck && !state.pending && await this.store.hasToken()) return this.start({}, signal, true);
+    throw new CfError('SETUP', 'The connector token was saved, but this profile cannot reconnect yet. Finish setup from the local settings.');
   }
   async restartConnector(signal) {
     const previous = this.connector;
@@ -391,7 +404,7 @@ export class Controller {
     const stopping = Promise.resolve().then(async () => {
       await cancelled; await Promise.allSettled(work);
       this.oauthLink = null;
-      if (['waiting', 'exchanging', 'expired', 'error', 'denied'].includes(this.oauthView.phase)) this.oauthView = { phase: 'cancelled', attempt: this.oauthView.attempt, expiresAt: null, failure: null };
+      if (['waiting', 'exchanging'].includes(this.oauthView.phase)) this.oauthView = { phase: 'cancelled', attempt: this.oauthView.attempt, expiresAt: null, failure: null };
       await this.closeRuntime();
       this.evidence = {}; this.reachability = null; this.phase = 'stopped';
       this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));

@@ -76,7 +76,8 @@ export function rpcRoute(connection, handle) {
       }
       let url; try { url = new URL(req.url, 'http://local.invalid'); } catch { return text(res, 404, 'not found'); }
       const endpoint = endpointOf(url.pathname);
-      if ((endpoint === 'oauth/attempt' || endpoint?.startsWith('update-')) && !isManagementRequest(req)) return text(res, 403, 'management connection required');
+      // status is the only public read. Every other action changes state or can return a secret.
+      if (endpoint !== undefined && endpoint !== 'status' && !isManagementRequest(req)) return text(res, 403, 'management connection required');
       if (req.method !== 'POST' || endpoint === undefined || url.search) return text(res, 404, 'not found');
       if (String(req.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase() !== 'application/json') return text(res, 415, 'content type must be application/json');
       let raw;

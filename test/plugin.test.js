@@ -118,6 +118,37 @@ test('management authority is the peer address; Host and forwarding headers cann
   assert.equal(isManagementRequest(req('203.0.113.8', 'evil.example.com@127.0.0.1')), false);
   assert.equal(isManagementRequest(req('127.0.0.1', '127.0.0.1@evil.example.com')), false);
 });
+test('state-changing and secret-returning actions require a management peer before the handler runs', async () => {
+  const secret = 'super-secret-management-value';
+  const seen = [];
+  const route = rpcRoute({ requestRejection: () => undefined }, async endpoint => { seen.push(endpoint); return { ok: true, value: endpoint === 'status' ? { phase: 'idle' } : { authorizationUrl: secret } }; });
+  const respond = () => ({ status: 0, body: '', headersSent: false, writeHead(status) { this.status = status; this.headersSent = true; }, end(body = '') { this.body = body; }, setHeader() {} });
+  const endpoints = ['oauth/start', 'oauth/finish', 'oauth/cancel', 'oauth/attempt', 'token/refresh', 'forget', 'remove', 'start', 'resume', 'mfa/enable', 'authorize', 'account', 'host/confirm', 'autoconnect', 'stop', 'cancel', 'update-status', 'update-check', 'update-install', 'nope'];
+  for (const endpoint of endpoints) {
+    const res = respond();
+    await route.handler({
+      url: `/dsh-cf/${endpoint}`, method: 'POST',
+      headers: { host: 'dsh.example.com', origin: 'https://dsh.example.com', 'content-type': 'application/json' },
+      socket: { remoteAddress: '203.0.113.9' },
+      on() {}, once() {},
+    }, res);
+    assert.equal(res.status, 403, endpoint);
+    assert.equal(res.body.includes(secret), false, endpoint);
+  }
+  assert.deepEqual(seen, []);
+  const res = respond();
+  const body = JSON.stringify({ type: 'client-request', rpcId: 'status-1', method: 'status', payload: {} });
+  await route.handler({
+    url: '/dsh-cf/status', method: 'POST',
+    headers: { host: 'dsh.example.com', origin: 'https://dsh.example.com', 'content-type': 'application/json' },
+    socket: { remoteAddress: '203.0.113.9' },
+    on(event, fn) { if (event === 'data') fn(Buffer.from(body)); },
+    once(event, fn) { if (event === 'end') fn(); },
+  }, res);
+  assert.equal(res.status, 200);
+  assert.deepEqual(seen, ['status']);
+  assert.equal(res.body.includes(secret), false);
+});
 test('oauth/attempt is refused without a management peer and status omits the authorization URL', async t => {
   const sent = [];
   const route = rpcRoute({ requestRejection: () => undefined }, async () => { sent.push('handle'); return { ok: true, value: { authorizationUrl: 'http://secret.example/callback' } }; });

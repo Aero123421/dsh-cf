@@ -8,7 +8,7 @@ DSHの設定画面から、専用のCloudflare Tunnel・DNS・Accessアプリを
 
 ## 導入
 
-Node.js **22.12以上**。公開APIの基準は DSH `0.2.1-alpha.2`（upstream `d743267388641bc76f17c45ce8b4c231aed1d32c`）です。`@deepseek-ai/dsh` の peer は `>=0.2.1-alpha.2 <0.3.0-0` です。DSH は起動時にこの範囲を `semver.satisfies`（`includePrerelease: true`）で見るため、`0.2.1-alpha.2`、`0.2.1-alpha.3`、それ以降の 0.2 系（プレリリースを含む）では読み込まれ、`0.3.0` とそのプレリリースでは読み込まれません。上限を `<0.3.0` にすると、同じオプションでは `0.3.0` のプレリリースまで含まれます。下限は実機で確認した `0.2.1-alpha.2` です。`0.2.0-rc.2` 以前はこのプラグインの確認対象外です。`0.2.1-alpha.3` は公開された互換判定と導入契約をソースで確認しており、この版をその DSH へ実インストールした確認はまだです。
+Node.js **22.12以上**。公開APIの基準は DSH `0.2.1-alpha.2`（upstream `d743267388641bc76f17c45ce8b4c231aed1d32c`）です。`@deepseek-ai/dsh` の peer は `>=0.2.1-alpha.2 <0.3.0-0` です。DSH は起動時にこの範囲を `semver.satisfies`（`includePrerelease: true`）で見るため、`0.2.1-alpha.2`、`0.2.1-alpha.3`、それ以降の 0.2 系（プレリリースを含む）では読み込まれ、`0.3.0` とそのプレリリースでは読み込まれません。上限を `<0.3.0` にすると、同じオプションでは `0.3.0` のプレリリースまで含まれます。下限は実機で確認した `0.2.1-alpha.2` です。`0.2.0-rc.2` 以前はこのプラグインの確認対象外です。Linux・Node.js 22.23.3 で、公開 npm の DSH `0.2.1-alpha.2` と `0.2.1-alpha.3` の新しい web profile に tarball を入れて起動し、未認証の `GET /`、起動トークンの Cookie 交換、`POST /dsh-cf/status` を確認しています。手順と結果は「検証」にあります。
 
 ```sh
 dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.3'
@@ -22,7 +22,7 @@ dsh web
 dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<reviewed-commit-sha>'
 ```
 
-プラグイン自身にビルドやinstallスクリプトはありません。実行時依存は`jose`のみ。Git/npmインストール時に取得します。
+プラグイン自身にビルドやinstallスクリプトはありません。実行時依存は`jose`と`semver`です。Git/npmインストール時に取得します。
 
 **まずWebプロファイルで検証してください。** Desktop版も動的な待受ポートを取得するコードになっていますが、Desktopのプラグイン読み込みとElectronを含む動作保証はまだありません。別のDSHを同じprofile/stateディレクトリで同時に起動しないでください。
 
@@ -37,13 +37,13 @@ dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<reviewed-commit-sha>'
 
 以後は`https://mac.example.com/`などの公開URLからアクセスします。複数の閲覧端末は同じURLです。別のDSHは別profile・Tunnel・URLで登録してください。
 
-**Tunnelの起動と接続確認済みは別です。** コネクタ登録、未認証アクセスの拒否、所有者の署名付き認証、DSH画面/API/WS応答をそれぞれ表示します。ブラウザを閉じてもホスト側のセットアップ処理は続き、設定画面を開き直すと状態を再取得します。ブラウザを閉じたことやWebSocketの15分上限は、接続を止めたことや上流の障害としては表示しません。Tunnelが戻ったあとは、過去の成功を残したまま、DSHの応答を再確認します。過去の確認時刻は「最終確認」と表示し、今の接続の成功には使いません。
+**Tunnelの起動と接続確認済みは別です。** コネクタ登録、未認証アクセスの拒否、所有者の署名付き認証、DSH画面/API/WS応答をそれぞれ表示します。ブラウザを閉じてもホスト側のセットアップ処理は続き、設定画面を開き直すと状態を再取得します。ブラウザを閉じたことやWebSocketの15分上限は、接続を止めたことや上流の障害としては表示しません。ある通信路でDSHが成功を返したあとに一時的な5xxを返しても、その確認、Ready、保存した最終確認時刻は残します。その通信路で一度も成功する前の5xxは成功として記録しません。認証拒否は確認を取り消します。Tunnelが戻ったあとは、過去の成功を残したまま、DSHの応答を再確認します。過去の確認時刻は「最終確認」と表示し、今の接続の成功には使いません。
 
 設定画面の文言はDSHのlocaleに従います。このタブは英語・日本語・中国語を登録します。日本語を追加するため、ブラウザが日本語のときはDSHの言語選択に日本語が現れます。他の画面に日本語の辞書がなければ、その画面は英語へ戻ります。「保護設定を作成して接続」が押せないときは、認可・ホスト名・MFA・処理中など、その理由をボタンのそばに1文で出します。
 
-組織がアイデンティティプロバイダーのMFAで独立したWebAuthnを省略できる場合、または応答からそれが判断できない場合は公開しません。このプラグインはその共有設定をオフにしません。Tunnel tokenをCloudflareが更新したあとは、管理認可がある接続から「コネクタの資格情報を再取得して接続」で、所有するTunnelのtokenだけを読み直して専用コネクタを再起動します。保存済みtokenでの再接続に管理認可は不要です。再取得に失敗しても、保存済みのtokenファイルは置き換えません。
+組織がアイデンティティプロバイダーのMFAで独立したWebAuthnを省略できる場合、または応答からそれが判断できない場合は公開しません。`amr_matching_enabled`、`amr_matching_session_duration`、`amr_session_duration` の3つがすべて無い応答も判断できないものとして公開しません。明示的にその置換が無効で、期間も無い場合だけ、独立したWebAuthnとして扱います。このプラグインはその共有設定をオフにしません。Tunnel tokenをCloudflareが更新したあとは、管理認可がある接続から「コネクタの資格情報を再取得して接続」で、所有するTunnelをAPIで読み、返った値がアカウントID・Tunnel ID・秘密を持つconnector tokenであり、そのIDがこのインスタンスと一致するときだけファイルを置き換えます。保存済みtokenでの再接続に管理認可は不要です。再取得に失敗しても、保存済みのtokenファイルは置き換えず、動いているGateとコネクタも止めません。tokenを読めても、動いているコネクタの再起動も、保存済み設定からの再開もできないときは成功にしません。
 
-OAuthの進行、拒否、期限切れ、交換失敗はHostが保持します。状態APIには認可URL、認可コード、PKCE、管理tokenを含めません。進行中のURLは、元の管理接続からの再取得だけで戻します。処理の途中でも停止を送れます。停止中は、Hostが完了を返すまで次の変更を始めません。
+OAuthの進行、拒否、期限切れ、交換失敗はHostが保持します。停止しても、拒否・期限切れ・交換失敗とその理由は取り消しへ置き換えません。進行中の認可だけを取り消します。状態APIには認可URL、認可コード、PKCE、管理tokenを含めません。進行中のURLは、元の管理接続からの再取得だけで戻します。処理の途中でも停止を送れます。停止中は、Hostが完了を返すまで次の変更を始めません。
 
 公開されたDSH内のCloudflare設定ページは**状態の閲覧のみ**です。作成、認可、削除、停止などは元の信頼済みDSH接続から行います。
 
@@ -182,6 +182,12 @@ Linux x64・Node **24.19.0**で`npm ci && npm run check`を実行し、**138件�
 
 Cloudflareの応答とconnectorの複数接続ログにはローカルfixtureを使っています。下記の実DSH検証は旧版の記録であり、この修正版について実Cloudflare・実WebAuthnの検証を追加したものではありません。
 
+### 実DSHでの待受（0.1.0-alpha.4、Linux x64・Node.js 22.23.3）
+
+公開 npm の `@deepseek-ai/dsh@0.2.1-alpha.2` と `@deepseek-ai/dsh@0.2.1-alpha.3` に、レビュー対象コミットの tarball と、この修正を含んだ tarball を、それぞれ新しい web profile へ `dsh plugin --profile web add` で入れ、`dsh web --no-open --host 127.0.0.1` で起動した。4通りとも HTTP は応答した。未認証の `GET /` は 401、起動トークンの交換は 303 と Cookie、Cookie 付きの `GET /` は HTML 200、`POST /dsh-cf/status` は `type: server-response`、`ok: true`、`phase: idle`、`version: 0.1.0-alpha.4` だった。応答本文に起動トークンは含まれない。ここまでが確認範囲で、実 Cloudflare、Access、cloudflared、`trustedHosts` の再確認は含まない。
+
+公開されている `dsh` の `lib/bin.js` は `import.meta.main` が真のときだけ CLI を実行する。Node.js 22.14.0 ではその値が未定義で、`0.2.1-alpha.2` と `0.2.1-alpha.3` の `dsh --version` は終了コード 0、標準出力も標準エラーも空だった。その状態では待受が始まらない。この確認に使った Node.js 22.23.3 ではその値が真で、上記の待受が始まった。
+
 ### 実DSHでの確認（0.1.0-alpha.2）
 
 npm公開版のDSH `@deepseek-ai/dsh@0.2.1-alpha.2`（Linux、webプロファイル）に、READMEの`dsh plugin --profile web add`でインストールして確認しました。
@@ -228,7 +234,7 @@ MIT。DeepSeek/Cloudflareの公式製品ではありません。
 
 「プラグインを更新する」は、確認したリリースの明示タグをDSHのプラグイン管理へ渡します。現在のGitHub配布経路と版固定、bundleのON/OFFを維持します。ソースのJSから導入するため、Release assetやインストール時のビルドは不要です。ローカルの開発ディレクトリ・tgz・npm等から導入した場合や、画面から変更できない環境では、元の配布元から手動更新してください。
 
-更新候補のpackage名・版・JS entry・bundle宣言とDSH対応範囲を確認し、導入済みの版を下げません。対応範囲はDSHのapp-bootと同じ判定です。`semver.satisfies(runtime, range, { includePrerelease: true })` を使い、`workspace:^` / `workspace:~` / `workspace:*` は実行中の版を指します。`^0.2.1-alpha.2`、`~0.2.1-alpha.2`、`0.2.x`、ハイフン範囲、`*` もこの規則で判定します。空白や解釈できない範囲は導入しません。
+更新候補のpackage名・版・JS entry・bundle宣言とDSH対応範囲を確認し、導入済みの版を下げません。DSHの起動時は、公開されている app-boot の `evaluatePluginCompatibility` が `semver.satisfies(runtime, range, { includePrerelease: true })` でこのプラグインの peer を見ます。そのため `>=0.2.1-alpha.2 <0.3.0-0` は `0.2.1-alpha.2` と `0.2.1-alpha.3` で読み込まれます。更新画面の判定はそれより狭く、上限のない範囲（`*`、`x`、`>=0` など）と `workspace:` 指定は導入しません。上限のある `^0.2.1-alpha.2`、`~0.2.1-alpha.2`、`0.2.x`、ハイフン範囲、完全一致は、実行中の版がその範囲に入るときだけ導入します。`~0.2.1` は `0.2.1-alpha.3` を含みません。空白や解釈できない範囲も導入しません。
 
 導入は確認したタグの `github:Aero123421/dsh-cf#<tag>` を DSH の `installBundle` に渡します。DSH `0.2.1-alpha.3` で HMR が有効なとき、保存済みの依存指定と文字列が一致する spec は `already-installed` で拒否され、profile は変更されません。そのときは同じタグの `git+https://github.com/Aero123421/dsh-cf.git#<tag>` で同じ導入をやり直します。保存済みの文字列と違うため、pnpm は実行されます。`0.2.1-alpha.2` では最初の `installBundle` が、入っているパッケージの上から導入します。
 

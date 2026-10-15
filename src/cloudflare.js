@@ -1,4 +1,5 @@
 import { CfError, demand, hostname, email, cfId, issuer, boundedJson, timeout, digest } from './common.js';
+import { parseConnectorToken } from './store.js';
 
 const API = 'https://api.cloudflare.com/client/v4';
 const PER_PAGE = 50;
@@ -8,8 +9,10 @@ const DURATION = /^(?:0|[1-9]\d*)[mh]$/;
  * Whether this organization still forces an independent WebAuthn prompt.
  * The API field is `amr_matching_session_duration`. The Access guide also returns
  * `amr_matching_enabled` and `amr_session_duration`. Any one of those means IdP MFA
- * can skip the independent prompt. Omission of all three is the optional-field default
- * (not enabled). A present value that is not a boolean or duration is unknown.
+ * can skip the independent prompt. If all three are absent, the response does not
+ * show whether that shortcut is on, so publication stops. An explicit
+ * `amr_matching_enabled: false` with no duration is independent WebAuthn.
+ * A present value that is not a boolean or duration is unknown.
  */
 export function mfaAssurance(organization) {
   const config = organization?.mfa_config;
@@ -25,6 +28,7 @@ export function mfaAssurance(organization) {
   const guideDuration = duration(config.amr_session_duration);
   if ((enabled != null && typeof enabled !== 'boolean') || apiDuration === 'bad' || guideDuration === 'bad') return { state: 'unknown', missing: absent };
   if (enabled === true || apiDuration === 'set' || guideDuration === 'set') return { state: 'substitute', missing: absent };
+  if (enabled == null && apiDuration === 'absent' && guideDuration === 'absent') return { state: 'unknown', missing: absent };
   return { state: 'independent', missing: absent };
 }
 function demandIndependentMfa(assurance) {
@@ -142,7 +146,11 @@ export async function refreshTunnelToken(cf, store, signal) {
   const tunnel = await cf.get(tunnelPath, signal);
   demand(tunnel?.name === `dsh-cf-${instanceId}` && !tunnel.deleted_at, 'TUNNEL_CHANGED', 'The stored Tunnel ID no longer belongs to this instance.');
   const token = await cf.get(`${tunnelPath}/token`, signal);
-  await store.writeToken(typeof token === 'string' ? token : token?.token);
+  signal?.throwIfAborted();
+  const raw = typeof token === 'string' ? token : token?.token;
+  const parsed = parseConnectorToken(raw);
+  demand(parsed && parsed.accountId === setup.accountId && parsed.tunnelId === String(owned.tunnelId).toLowerCase(), 'TOKEN', 'Cloudflare returned an invalid connector token.');
+  await store.writeToken(raw);
 }
 /** Durable checkpoints record our IDs; a lost POST result is never silently retried. */
 export async function provision(cf, store, setup, gatePort, signal, progress = () => {}) {

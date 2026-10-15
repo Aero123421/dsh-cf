@@ -130,7 +130,7 @@ export class Gate {
         const channel = url.pathname.startsWith('/api/') ? 'api' : 'http';
         if (response.statusCode === 401) this.adapter.invalidate(); // Never replay a possibly executed POST.
         if (response.statusCode === 401) this.reportFault({ status: 'auth-rejected', channel });
-        else if (response.statusCode >= 500) this.reportFault({ status: 'upstream-failed', channel });
+        else if (response.statusCode >= 500) this.reportFault({ status: 'upstream-failed', channel, httpStatus: response.statusCode });
         else if (response.statusCode >= 200 && response.statusCode < 300) {
           if (url.pathname === '/') this.onEvidence('http');
           if (url.pathname.startsWith('/api/')) this.onEvidence('api');
