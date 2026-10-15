@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
     const COPY = {
       "en": {
         "requireWebAuthn": "Require additional Touch ID or security key verification (optional)",
-        "authHint": "Sign in with your selected Cloudflare login method. This browser stays signed in until the Access session expires.",
+        "authHint": "Sign in with your selected Cloudflare login method. This browser stays signed in for up to one week.",
         "verifyAccessHint": "Sign in to Cloudflare Access with the selected login method. The browser keeps the Access session in a cookie.",
         "saveConnect": "Save protection and connect",
         "authSavedHint": "Changes take effect only when you save and connect. Changing authentication requires a new traffic check.",
@@ -183,7 +183,7 @@ window.__ModuleLoader__.load({
       },
       "ja": {
         "requireWebAuthn": "Touch ID・セキュリティキーでの追加認証を要求する（任意）",
-        "authHint": "選んだ方法でCloudflareにログインします。Accessのセッション期限までブラウザにログイン状態を保持します。",
+        "authHint": "選んだ方法でCloudflareにログインします。ブラウザにログイン状態を最長1週間保持します。",
         "verifyAccessHint": "選んだ方法でCloudflare Accessにログインします。認証後はCookieでログイン状態を保持します。",
         "saveConnect": "保護設定を保存して接続",
         "authSavedHint": "変更は「保存して接続」を押すと反映します。認証方法を変えた後は通信を再確認します。",
@@ -359,7 +359,7 @@ window.__ModuleLoader__.load({
       },
       "zh": {
         "requireWebAuthn": "要求额外的 Touch ID 或安全密钥验证（可选）",
-        "authHint": "使用所选方式登录 Cloudflare。浏览器会保持登录，直到 Access 会话过期。",
+        "authHint": "使用所选方式登录 Cloudflare。浏览器最多保持登录一周。",
         "verifyAccessHint": "使用所选方式登录 Cloudflare Access，浏览器通过 Cookie 保持会话。",
         "saveConnect": "保存保护设置并连接",
         "authSavedHint": "仅在保存并连接后应用更改。更改验证方式后需重新验证流量。",

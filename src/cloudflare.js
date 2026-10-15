@@ -3,6 +3,7 @@ import { parseConnectorToken } from './store.js';
 
 const API = 'https://api.cloudflare.com/client/v4';
 const PER_PAGE = 50;
+export const ACCESS_SESSION_DURATION = '168h';
 const MFA = { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'], session_duration: '1h' };
 // Older saved setups have no flag and must retain their WebAuthn requirement.
 export const requiresWebAuthn = setup => setup.requireWebAuthn !== false;
@@ -177,23 +178,28 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
     const { requireWebAuthn: previousMode, ...previous } = s.setup;
     const { requireWebAuthn: nextMode, ...next } = setup;
     demand(exact(previous, next), 'SETUP_CHANGED', 'Remove this instance’s existing public configuration before changing its account, hostname, owner, or IdP.');
-    if (requiresWebAuthn(s.setup) !== requiresWebAuthn(setup)) {
-      demand(owned.appId, 'SETUP_CHANGED', 'Finish or remove the existing setup before changing its authentication mode.');
+    const modeChanged = requiresWebAuthn(s.setup) !== requiresWebAuthn(setup);
+    if (modeChanged) demand(owned.appId, 'SETUP_CHANGED', 'Finish or remove the existing setup before changing its authentication mode.');
+    if (owned.appId) {
       const app = await validateAccess(cf, s.setup, owned, s.instanceId, signal);
-      const path = `/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}`;
-      const policies = await cf.list(`${path}/policies`, signal);
-      demand(policies.every(policy => !policy.mfa_config), 'MFA_CHANGED', 'An existing policy overrides MFA. It was not changed automatically.');
-      signal?.throwIfAborted();
-      s.pending = { kind: 'authentication', path, marker, at: new Date().toISOString() }; await store.save();
-      try {
-        await cf.call('PUT', path, { ...app, mfa_config: appMfa(setup) }, signal);
-      } catch (error) {
-        if (error instanceof CfError && /^CF_4\d\d$/.test(error.code)) { s.pending = null; await store.save(); }
-        throw error;
+      if (modeChanged || app.session_duration !== ACCESS_SESSION_DURATION) {
+        const path = `/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}`;
+        const policies = await cf.list(`${path}/policies`, signal);
+        if (modeChanged) demand(policies.every(policy => !policy.mfa_config), 'MFA_CHANGED', 'An existing policy overrides MFA. It was not changed automatically.');
+        demand(policies.every(policy => !policy.session_duration || policy.session_duration === ACCESS_SESSION_DURATION), 'SESSION_CHANGED', 'An existing policy overrides the session duration. Review that policy before changing the application session.');
+        signal?.throwIfAborted();
+        s.pending = { kind: modeChanged ? 'authentication' : 'session', path, marker, at: new Date().toISOString() }; await store.save();
+        try {
+          await cf.call('PUT', path, { ...app, session_duration: ACCESS_SESSION_DURATION, ...(modeChanged ? { mfa_config: appMfa(setup) } : {}) }, signal);
+        } catch (error) {
+          if (error instanceof CfError && /^CF_4\d\d$/.test(error.code)) { s.pending = null; await store.save(); }
+          throw error;
+        }
+        const updated = await validateAccess(cf, setup, owned, s.instanceId, signal);
+        demand(updated.session_duration === ACCESS_SESSION_DURATION, 'SESSION_CHANGED', 'Cloudflare did not return the requested one-week session duration.');
+        s.setup = setup; s.pending = null; s.proven = false; s.autoConnect = false;
+        s.lastVerifiedAt = null; s.lastConfigurationCheck = null; await store.save();
       }
-      await validateAccess(cf, setup, owned, s.instanceId, signal);
-      s.setup = setup; s.pending = null; s.proven = false; s.autoConnect = false;
-      s.lastVerifiedAt = null; s.lastConfigurationCheck = null; await store.save();
     }
   }
   const [records, apps] = await Promise.all([
@@ -217,11 +223,15 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
   progress('access');
   if (!owned.appId) {
     await writeNew('access', `/accounts/${id(setup.accountId)}/access/apps`, {
-      name: marker, type: 'self_hosted', domain: setup.hostname, allowed_idps: [setup.idpId], session_duration: '1h', mfa_config: appMfa(setup),
+      name: marker, type: 'self_hosted', domain: setup.hostname, allowed_idps: [setup.idpId], session_duration: ACCESS_SESSION_DURATION, mfa_config: appMfa(setup),
       policies: [{ name: `${marker}-owner`, decision: 'allow', precedence: 1, include: [{ email: { email: setup.ownerEmail } }], require: [], exclude: [] }],
     }, async app => { demand(typeof app?.id === 'string', 'CF_CREATE', 'Cloudflare returned no Access application ID.'); owned.appId = app.id; });
   }
-  const app = await validateAccess(cf, setup, owned, s.instanceId, signal); owned.audience = app.aud; await store.save();
+  const app = await validateAccess(cf, setup, owned, s.instanceId, signal);
+  demand(app.session_duration === ACCESS_SESSION_DURATION, 'SESSION_CHANGED', 'Cloudflare did not return the requested one-week session duration.');
+  const sessionPolicies = await cf.list(`/accounts/${id(setup.accountId)}/access/apps/${id(owned.appId)}/policies`, signal);
+  demand(sessionPolicies.every(policy => !policy.session_duration || policy.session_duration === ACCESS_SESSION_DURATION), 'SESSION_CHANGED', 'An existing policy overrides the one-week application session.');
+  owned.audience = app.aud; await store.save();
   progress('tunnel');
   if (!owned.tunnelId) {
     await writeNew('tunnel', `/accounts/${id(setup.accountId)}/cfd_tunnel`, { name: marker, config_src: 'cloudflare' }, async tunnel => {

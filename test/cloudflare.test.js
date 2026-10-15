@@ -291,7 +291,7 @@ test('Access-only sign-in requires explicit false, validates input and does not 
   await provision(f.cf, f.store, setup, 4000);
   assert.deepEqual(f.data.apps[0].mfa_config, { mfa_disabled: true });
   assert.deepEqual(f.data.policies.get('app-1')[0].include, [{ email: { email: SETUP.ownerEmail } }]);
-  assert.equal(f.data.apps[0].session_duration, '1h');
+  assert.equal(f.data.apps[0].session_duration, '168h');
   assert(f.store.state.owned.audience);
   assert.equal(f.data.writes.some(w => w.p.endsWith('/access/organizations')), false);
   assert.equal(f.store.state.setup.requireWebAuthn, false);
@@ -372,4 +372,50 @@ test('mode-change rejected writes preserve the previous setup and clear only the
   await assert.rejects(provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000), { code: 'CF_403' });
   assert.equal(f.store.state.pending, null); assert.deepEqual(f.store.state.setup, SETUP);
   assert.equal(f.data.apps[0].mfa_config.mfa_disabled, false);
+});
+
+test('saving an existing one-hour app updates only its session to one week and is idempotent', async () => {
+  const f = make(), setup = { ...SETUP, requireWebAuthn: false };
+  await provision(f.cf, f.store, setup, 4000);
+  f.data.apps[0].session_duration = '1h';
+  const before = f.data.writes.length, ids = { ...f.store.state.owned }, mfa = structuredClone(f.data.apps[0].mfa_config);
+  await provision(f.cf, f.store, setup, 4000);
+  const writes = f.data.writes.slice(before);
+  assert.equal(writes.length, 1); assert.equal(writes[0].method, 'PUT'); assert(writes[0].p.endsWith('/access/apps/app-1'));
+  assert.equal(f.data.apps[0].session_duration, '168h'); assert.deepEqual(f.data.apps[0].mfa_config, mfa);
+  assert.deepEqual(f.store.state.owned, ids); assert.equal(f.store.state.pending, null);
+  await provision(f.cf, f.store, setup, 4000);
+  assert.equal(f.data.writes.length, before + 1);
+});
+
+test('a policy session override is not silently extended or reported as a week', async () => {
+  const f = make(), setup = { ...SETUP, requireWebAuthn: false };
+  await provision(f.cf, f.store, setup, 4000);
+  f.data.policies.get('app-1')[0].session_duration = '30m';
+  for (const duration of ['1h', '168h']) {
+    f.data.apps[0].session_duration = duration;
+    const before = f.data.writes.length;
+    await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'SESSION_CHANGED' });
+    assert.equal(f.data.writes.length, before);
+    assert.equal(f.data.policies.get('app-1')[0].session_duration, '30m');
+  }
+});
+
+test('a session update with a lost response stays pending and is never replayed', async () => {
+  const f = make(), setup = { ...SETUP, requireWebAuthn: false };
+  await provision(f.cf, f.store, setup, 4000); f.data.apps[0].session_duration = '1h';
+  f.data.fail = ({ method, p }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) throw new Error('lost'); };
+  await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'CF_NETWORK' });
+  assert.equal(f.store.state.pending.kind, 'session');
+  const before = f.data.writes.length; f.data.fail = null;
+  await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'WRITE_UNKNOWN' });
+  assert.equal(f.data.writes.length, before);
+});
+
+test('a session update must read back the requested one-week duration', async () => {
+  const f = make(), setup = { ...SETUP, requireWebAuthn: false };
+  await provision(f.cf, f.store, setup, 4000); f.data.apps[0].session_duration = '1h';
+  f.data.fail = ({ method, p, body }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) body.session_duration = '1h'; };
+  await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'SESSION_CHANGED' });
+  assert.equal(f.store.state.pending.kind, 'session');
 });
