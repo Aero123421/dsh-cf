@@ -6,13 +6,11 @@ const PER_PAGE = 50;
 const MFA = { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'], session_duration: '1h' };
 const DURATION = /^(?:0|[1-9]\d*)[mh]$/;
 /**
- * Whether this organization still forces an independent WebAuthn prompt.
- * The API field is `amr_matching_session_duration`. The Access guide also returns
- * `amr_matching_enabled` and `amr_session_duration`. Any one of those means IdP MFA
- * can skip the independent prompt. If all three are absent, the response does not
- * show whether that shortcut is on, so publication stops. An explicit
- * `amr_matching_enabled: false` with no duration is independent WebAuthn.
- * A present value that is not a boolean or duration is unknown.
+ * The organization API exposes AMR matching as optional duration configuration.
+ * An omitted/null duration is unset; unlike a duration of 0m, it does not enable
+ * IdP MFA substitution. Also honor the Access guide's explicit flag and alias.
+ * Require a recognizable MFA configuration before interpreting absent AMR fields.
+ * https://developers.cloudflare.com/api/resources/zero_trust/subresources/organizations/methods/list/
  */
 export function mfaAssurance(organization) {
   const config = organization?.mfa_config;
@@ -28,7 +26,10 @@ export function mfaAssurance(organization) {
   const guideDuration = duration(config.amr_session_duration);
   if ((enabled != null && typeof enabled !== 'boolean') || apiDuration === 'bad' || guideDuration === 'bad') return { state: 'unknown', missing: absent };
   if (enabled === true || apiDuration === 'set' || guideDuration === 'set') return { state: 'substitute', missing: absent };
-  if (enabled == null && apiDuration === 'absent' && guideDuration === 'absent') return { state: 'unknown', missing: absent };
+  if (enabled == null && apiDuration === 'absent' && guideDuration === 'absent') {
+    const recognizable = Array.isArray(config.allowed_authenticators) && typeof config.session_duration === 'string' && DURATION.test(config.session_duration);
+    if (!recognizable) return { state: 'unknown', missing: absent };
+  }
   return { state: 'independent', missing: absent };
 }
 function demandIndependentMfa(assurance) {
