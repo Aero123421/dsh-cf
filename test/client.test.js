@@ -23,9 +23,9 @@ test('settings copy follows locale and the English headline is English', async (
   assert.deepEqual(Object.keys(plugin.COPY.ja).sort(), keys);
   assert.deepEqual(Object.keys(plugin.COPY.zh).sort(), keys);
   assert.equal(plugin.translate('en', 'headline'), plugin.COPY.en.headline);
-  assert.match(plugin.COPY.en.headline, /DSH/);
+  assert.equal(plugin.COPY.en.headline, 'Cloudflare');
   assert.equal(plugin.COPY.en.headline.includes('あなたのDSH'), false);
-  assert.equal(plugin.COPY.ja.headline.includes('あなたのDSH'), true);
+  assert.equal(plugin.COPY.ja.headline, 'Cloudflare');
   assert.equal(plugin.translate('ja', 'phaseRechecking'), plugin.COPY.ja.phaseRechecking);
   assert.equal(plugin.translate('zh', 'missing-key'), 'missing-key');
   assert.equal(plugin.COPY.en.oauthWaitingTitle.includes('ブラウザ'), false);
@@ -225,7 +225,7 @@ test('a public page and an in-progress authorization render their links', async 
   await new Promise(resolve => setImmediate(resolve));
   const savedText = collect();
   assert.equal(nodes.some(node => node?.type === 'a' && node.props.href === status.enrollmentUrl), false);
-  assert(savedText.includes(plugin.COPY.en.verifyAccessHint));
+  assert(savedText.includes(plugin.COPY.en.loginHint));
 
 });
 test('locale registration survives an already-registered language and exposes English by default', async () => {

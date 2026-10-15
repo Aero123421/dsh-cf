@@ -69,9 +69,9 @@ test('whole-surface gate rejects missing JWT and does not exchange a DSH token',
   const f = await fixture(t); const r = await http(f.gate.port, { headers: { host: HOST } });
   assert.equal(r.status, 401); assert.equal(f.upstream.exchanges, 0); assert.equal(f.gate.enabled, false);
 });
-test('owner proof is required; DSH cookie stays server-side and real public Host/Origin survive', async t => {
-  const f = await fixture(t); assert.equal((await http(f.gate.port, { headers })).status, 401);
-  assert.equal((await f.activate()).status, 200); assert.equal(f.upstream.exchanges, 1);
+test('normal owner navigation verifies DSH automatically; cookies stay server-side and Host/Origin survive', async t => {
+  const f = await fixture(t); assert.equal((await http(f.gate.port, { headers })).status, 200);
+  assert.equal(f.upstream.exchanges, 1); assert.equal(f.gate.enabled, true);
   const result = await http(f.gate.port, { headers: { ...headers, cookie: 'attacker=value', authorization: 'Bearer NOT-FOR-UPSTREAM', 'x-forwarded-host': 'evil.example.com' } });
   assert.equal(result.status, 200); assert.equal(result.headers['set-cookie'], undefined);
   const received = f.upstream.calls.at(-1).headers;
@@ -285,4 +285,42 @@ test('WebSocket end and the stream lifetime are not upstream failures', async t 
   await until(() => faults.some(event => event.status === 'websocket-closed'));
   assert.equal(faults.some(event => event.status === 'upstream-failed'), false);
   ws.socket.destroy();
+});
+
+test('an authenticated owner opens the normal URL without a separate verification link', async t => {
+  const f = await fixture(t);
+  assert.equal((await http(f.gate.port, { path: '/api/before', headers })).status, 401);
+  assert.equal(f.upstream.exchanges, 0);
+  assert.equal((await http(f.gate.port, { path: '/', headers })).status, 200);
+  assert.equal(f.upstream.exchanges, 1);
+  assert(f.evidence.includes('owner')); assert(f.evidence.includes('http'));
+  assert.equal((await http(f.gate.port, { path: '/api/after', headers })).status, 200);
+  assert(f.evidence.includes('api'));
+  const ws = await websocket(f.gate.port); assert.equal(ws.status, 101); ws.socket.destroy();
+  assert(f.evidence.includes('websocket'));
+});
+
+test('automatic entry never enables the gate after a failed DSH cookie exchange', async t => {
+  const f = await fixture(t);
+  f.adapter.cookie = async () => { throw new Error('private diagnostic'); };
+  const r = await http(f.gate.port, { headers });
+  assert.equal(r.status, 401); assert.equal(f.gate.enabled, false); assert.equal(f.evidence.includes('owner'), false);
+  assert.equal(r.body.includes('private diagnostic'), false);
+});
+
+test('automatic entry cannot enable a stopped gate while DSH verification is pending', async t => {
+  const f = await fixture(t); let finish;
+  f.adapter.cookie = () => new Promise(resolve => { finish = resolve; });
+  const pending = http(f.gate.port, { headers }).catch(() => null);
+  await until(() => !!finish); const closing = f.gate.close(); finish('not-a-browser-cookie');
+  await Promise.all([pending, closing]);
+  assert.equal(f.gate.enabled, false); assert.equal(f.evidence.includes('owner'), false);
+});
+
+test('browser entry errors explain how to recover without exposing raw authentication errors', async t => {
+  const f = await fixture(t, { verify: async () => { throw new Error('private bearer secret'); } });
+  const result = await http(f.gate.port, { headers: { ...headers, accept: 'text/html', 'accept-language': 'ja' } });
+  assert.equal(result.status, 401); assert.match(result.headers['content-type'], /text\/html/);
+  assert.match(result.body, /ログインし直す/); assert.equal(result.body.includes('private bearer secret'), false);
+  assert.equal(f.gate.enabled, false); assert.equal(f.upstream.exchanges, 0);
 });
