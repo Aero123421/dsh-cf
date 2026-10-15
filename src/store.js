@@ -6,6 +6,7 @@ import { CfError, demand, digest, nonce, pause } from './common.js';
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/;
 const TUNNEL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SECRET_BYTES = 32;
 function decodeBase64(value) {
   const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 === 1) return null;
@@ -14,7 +15,7 @@ function decodeBase64(value) {
   if (!bytes.length || bytes.toString('base64').replace(/=+$/, '') !== padded.replace(/=+$/, '')) return null;
   return bytes;
 }
-/** Cloudflare connector token: base64 JSON `{a, t, s}` for one account, one tunnel, and a secret. The original string is what gets stored. */
+/** Cloudflare connector token: base64 JSON `{a, t, s}` for one account, one tunnel, and a secret of at least 32 bytes. The original string is what gets stored. */
 export function parseConnectorToken(token) {
   if (typeof token !== 'string' || /[\s\r\n]/.test(token)) return null;
   const bytes = decodeBase64(token);
@@ -26,7 +27,8 @@ export function parseConnectorToken(token) {
   if (Object.keys(value).some(key => key !== 'a' && key !== 't' && key !== 's')) return null;
   if (typeof value.a !== 'string' || !ACCOUNT_ID.test(value.a)) return null;
   if (typeof value.t !== 'string' || !TUNNEL_ID.test(value.t)) return null;
-  if (typeof value.s !== 'string' || !decodeBase64(value.s)) return null;
+  const secret = typeof value.s === 'string' ? decodeBase64(value.s) : null;
+  if (!secret || secret.length < SECRET_BYTES) return null;
   return { accountId: value.a, tunnelId: value.t.toLowerCase() };
 }
 export async function privateWrite(path, bytes, beforeCommit = () => {}) {

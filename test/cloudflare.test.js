@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Cloudflare, provision, removeOwned, validateAccess } from '../src/cloudflare.js';
-import { ACCOUNT, SETUP, AUD, TUNNEL, connectorToken, fakeCloudflare, memoryStore } from './helpers.js';
+import { parseConnectorToken } from '../src/store.js';
+import { ACCOUNT, SETUP, AUD, TUNNEL, connectorToken, tokenSecret, fakeCloudflare, memoryStore, reply } from './helpers.js';
 import { CfError, safeError } from '../src/common.js';
 const make = () => { const api = fakeCloudflare(); return { ...api, cf: new Cloudflare('test-management-token-123456789', api.fetchImpl), store: memoryStore() }; };
 test('provision builds an owner/WebAuthn app before tunnel and DNS; retry does not duplicate writes', async () => {
@@ -11,6 +12,7 @@ test('provision builds an owner/WebAuthn app before tunnel and DNS; retry does n
   assert.equal(f.data.writes[0].p.split('/').at(-1), 'apps'); assert.equal(f.data.writes.at(-1).p.split('/').at(-1), 'dns_records');
   assert.deepEqual(f.data.apps[0].policies[0].include, [{ email: { email: SETUP.ownerEmail } }]);
   assert.equal(f.data.apps[0].mfa_config.mfa_disabled, false);
+  assert.equal(f.store.token, connectorToken());
   assert.equal(f.data.configs.get(TUNNEL).config.ingress[0].originRequest.access.required, true);
   const count = f.data.writes.length; await provision(f.cf, f.store, setup, 4000); assert.equal(f.data.writes.length, count);
   assert(!JSON.stringify(f.store.saves).includes('test-management-token'));
@@ -215,6 +217,19 @@ test('Access validation rejects IdP MFA substitution without another write', asy
   await assert.rejects(validateAccess(f.cf, SETUP, f.store.state.owned, f.store.state.instanceId), { code: 'MFA_IDP_SUBSTITUTE' });
   assert.equal(f.data.writes.length, writes);
 });
+test('a tunnel create stores its token only when the account and tunnel ids match', async () => {
+  const mismatched = connectorToken({ accountId: 'b'.repeat(32), secret: tokenSecret('mismatched-create') });
+  const short = connectorToken({ secret: Buffer.alloc(31, 7) });
+  for (const bad of [mismatched, short]) {
+    const f = make();
+    f.data.fail = ({ p, method, body }) => {
+      if (method === 'POST' && p.endsWith('/cfd_tunnel')) return reply({ ...body, id: TUNNEL, token: bad });
+      return null;
+    };
+    await assert.rejects(provision(f.cf, f.store, SETUP, 4000), error => error.code === 'TOKEN' && !error.message.includes(bad) && !error.message.includes('mismatched'));
+    assert.equal(f.store.token, null);
+  }
+});
 test('a tunnel token is replaced only after a valid read of the owned tunnel', async t => {
   const { mkdtemp, readFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
@@ -230,9 +245,11 @@ test('a tunnel token is replaced only after a valid read of the owned tunnel', a
   f.data.tunnels.push({ id: TUNNEL, name: `dsh-cf-${store.state.instanceId}` });
   store.state.setup = { ...SETUP };
   store.state.owned = { tunnelId: TUNNEL };
-  const original = connectorToken({ secret: Buffer.from('original-connector-secret') });
+  assert.equal(parseConnectorToken(connectorToken({ secret: Buffer.alloc(31, 9) })), null);
+  assert.equal(parseConnectorToken(connectorToken({ secret: Buffer.alloc(32, 9) }))?.tunnelId, TUNNEL);
+  const original = connectorToken({ secret: tokenSecret('original-connector-secret') });
   await store.writeToken(original);
-  const standard = connectorToken({ secret: Buffer.from('secret-0-+/_') });
+  const standard = connectorToken({ secret: Buffer.alloc(32, 0xfb) });
   const next = standard.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   assert.notEqual(next, standard);
   f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply({ token: next }) : null;
@@ -247,7 +264,7 @@ test('a tunnel token is replaced only after a valid read of the owned tunnel', a
     assert.equal(await readFile(join(dir, 'tunnel.token'), 'utf8'), next);
   }
   const signal = AbortSignal.abort();
-  f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply(connectorToken({ secret: Buffer.from('cancelled-refresh') })) : null;
+  f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? reply(connectorToken({ secret: tokenSecret('cancelled-refresh') })) : null;
   await assert.rejects(refreshTunnelToken(f.cf, store, signal));
   assert.equal(await readFile(join(dir, 'tunnel.token'), 'utf8'), next);
   f.data.fail = ({ p, method }) => method === 'GET' && p.endsWith('/token') ? Response.json({ success: false }, { status: 500 }) : null;

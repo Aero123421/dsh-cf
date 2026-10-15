@@ -8,8 +8,8 @@ import manifest from '../package.json' with { type: 'json' };
 
 const peer = manifest.peerDependencies['@deepseek-ai/dsh'];
 const installs = ['0.2.1-alpha.2', '0.2.1-alpha.3'];
-const refused = ['*', 'x', '>=0', 'workspace:*', 'workspace:^', 'workspace:~', '>=0.2.1-alpha.2'];
-const compared = [peer, '^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.x', '0.2.1-alpha.2 - 0.3.0', '0.2.1-alpha.2', '~0.2.1', '', ' ', 'not a range'];
+const refused = ['*', 'x', '>=0', 'workspace:*', 'workspace:^', 'workspace:~', '>=0.2.1-alpha.2', '<99', '^0', '<=9.9.9', '<0.3.0-0', '>=0.2.1-alpha.2 <0.3.0', '0.2.x', '0.2.1-alpha.2 - 0.3.0'];
+const compared = [peer, '^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.1-alpha.2', '~0.2.1', '', ' ', 'not a range'];
 
 function fail(message) { throw new Error(message); }
 function commandFailure(result, label) {
@@ -42,17 +42,17 @@ try {
     }
     let acceptedByBoot = 0;
     for (const range of refused) {
-      if (dshPeerSatisfies(runtime, range)) fail(`updater accepted unbounded or workspace range ${range} on ${runtime}`);
+      if (dshPeerSatisfies(runtime, range)) fail(`updater accepted a range outside >=0.2.1-alpha.2 <0.3.0-0: ${range} on ${runtime}`);
       if (bootAccepts(evaluate, runtime, range)) acceptedByBoot++;
     }
     if (acceptedByBoot === 0) fail(`published app-boot ${runtime} rejected every unbounded sample, so this script did not observe the real boot predicate`);
     for (const range of compared) {
       const expected = bootAccepts(evaluate, runtime, range);
       const actual = dshPeerSatisfies(runtime, range);
-      if (actual !== expected) fail(`updater ${actual} disagreed with app-boot ${runtime} (${expected}) for bounded range ${JSON.stringify(range)}`);
+      if (actual !== expected) fail(`updater ${actual} disagreed with app-boot ${runtime} (${expected}) for range ${JSON.stringify(range)}`);
     }
   }
-  console.log(`peer ${peer} matches published evaluatePluginCompatibility on ${installs.join(' and ')}; the updater still refuses unbounded ranges and workspace specs`);
+  console.log(`peer ${peer} matches published evaluatePluginCompatibility on ${installs.join(' and ')}; the updater still refuses ranges outside >=0.2.1-alpha.2 <0.3.0-0 and workspace specs`);
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

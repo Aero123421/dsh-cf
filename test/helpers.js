@@ -5,6 +5,11 @@ export const HOST = 'dsh.example.com';
 export const ACCOUNT = 'a'.repeat(32), ZONE = 'b'.repeat(32), AUD = 'c'.repeat(64);
 export const TUNNEL = '11111111-1111-4111-8111-111111111111';
 /** Base64 JSON `{a, t, s}` in the shape cloudflared accepts. Tests keep this string exactly; the store does not re-encode it. */
+/** Pad a short fixture secret to the 32-byte minimum stored by `writeToken`. */
+export function tokenSecret(seed) {
+  const raw = Buffer.from(seed);
+  return raw.length >= 32 ? raw : Buffer.concat([raw, Buffer.alloc(32 - raw.length, 0x3c)]);
+}
 export function connectorToken({ accountId = ACCOUNT, tunnelId = TUNNEL, secret = Buffer.from('0123456789abcdef0123456789abcdef') } = {}) {
   const bytes = Buffer.isBuffer(secret) ? secret : Buffer.from(String(secret));
   return Buffer.from(JSON.stringify({ a: accountId, t: tunnelId, s: bytes.toString('base64') })).toString('base64');
@@ -42,6 +47,7 @@ export async function dshFixture({ host = '127.0.0.1' } = {}) {
   server.on('upgrade', (req, socket, head) => {
     calls.push({ path: req.url, headers: req.headers, upgrade: true });
     if (!trusted.has(req.headers.host) || req.headers.cookie !== cookie(req.headers.host)) return socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    if (new URL(req.url, 'http://fixture.invalid').pathname === '/api/down') return socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 11\r\n\r\nunavailable');
     const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     if (head.length) socket.write(head); socket.on('data', c => socket.write(c)); socket.on('error', () => {});

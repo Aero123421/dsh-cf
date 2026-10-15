@@ -300,8 +300,10 @@ test('an upstream failure is not success, and reconnect does not restore ready w
   const verified = f.store.state.lastVerifiedAt;
   assert.equal(typeof verified, 'string');
   f.gate.onFault({ status: 'upstream-failed', channel: 'http', httpStatus: 503 });
+  f.gate.onFault({ status: 'upstream-failed', channel: 'websocket', httpStatus: 503 });
   assert.equal(f.controller.phase, 'ready');
   assert.equal(f.controller.evidence.http, true);
+  assert.equal(f.controller.evidence.websocket, true);
   assert.equal(f.controller.error, null);
   assert.equal(f.store.state.proven, true);
   assert.equal(f.store.state.lastVerifiedAt, verified);
@@ -362,6 +364,29 @@ test('token refresh restarts only the connector, and a failed refetch keeps the 
   assert.equal(current.stopped, undefined);
   assert.equal(f.store.token, saved);
   assert.equal(JSON.stringify(f.controller.snapshot()).includes(saved), false);
+});
+test('a frozen refresh failure leaves the running gate and connector up', async t => {
+  const frozen = Object.freeze(new CfError('CF_NETWORK', 'Cloudflare did not respond.'));
+  const plain = Object.freeze(new Error('super-secret-refresh-detail'));
+  let which = frozen;
+  const f = await fixture(t, { refreshTunnelToken: async () => { throw which; } });
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  const connector = f.connector;
+  await f.controller.handle('token/refresh'); await f.controller.operation.promise;
+  assert.equal(Object.isFrozen(frozen), true);
+  assert.equal(frozen.preserveRuntime, undefined);
+  assert.equal(f.controller.phase, 'waiting-browser');
+  assert.equal(f.controller.error.code, 'CF_NETWORK');
+  assert.equal(f.controller.gate.closed, undefined);
+  assert.equal(f.connector, connector);
+  which = plain;
+  await f.controller.handle('token/refresh'); await f.controller.operation.promise;
+  assert.equal(plain.preserveRuntime, undefined);
+  assert.equal(f.controller.phase, 'waiting-browser');
+  assert.equal(f.controller.error.code, 'INTERNAL');
+  assert.equal(JSON.stringify(f.controller.snapshot()).includes('super-secret-refresh-detail'), false);
+  assert.equal(f.controller.gate.closed, undefined);
+  assert.equal(f.connector, connector);
 });
 test('token refresh does not report success when the profile cannot reconnect', async t => {
   const f = await fixture(t, { refreshTunnelToken: async () => {} });

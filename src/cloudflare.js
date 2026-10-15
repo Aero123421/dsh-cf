@@ -148,9 +148,12 @@ export async function refreshTunnelToken(cf, store, signal) {
   const token = await cf.get(`${tunnelPath}/token`, signal);
   signal?.throwIfAborted();
   const raw = typeof token === 'string' ? token : token?.token;
+  await store.writeToken(acceptedConnectorToken(raw, setup.accountId, owned.tunnelId));
+}
+function acceptedConnectorToken(raw, accountId, tunnelId) {
   const parsed = parseConnectorToken(raw);
-  demand(parsed && parsed.accountId === setup.accountId && parsed.tunnelId === String(owned.tunnelId).toLowerCase(), 'TOKEN', 'Cloudflare returned an invalid connector token.');
-  await store.writeToken(raw);
+  demand(parsed && parsed.accountId === accountId && parsed.tunnelId === String(tunnelId).toLowerCase(), 'TOKEN', 'Cloudflare returned an invalid connector token.');
+  return raw;
 }
 /** Durable checkpoints record our IDs; a lost POST result is never silently retried. */
 export async function provision(cf, store, setup, gatePort, signal, progress = () => {}) {
@@ -187,7 +190,7 @@ export async function provision(cf, store, setup, gatePort, signal, progress = (
   if (!owned.tunnelId) {
     await writeNew('tunnel', `/accounts/${id(setup.accountId)}/cfd_tunnel`, { name: marker, config_src: 'cloudflare' }, async tunnel => {
       demand(typeof tunnel?.id === 'string', 'CF_CREATE', 'Cloudflare returned no Tunnel ID.'); owned.tunnelId = tunnel.id;
-      if (tunnel.token) await store.writeToken(tunnel.token);
+      if (tunnel.token) await store.writeToken(acceptedConnectorToken(tunnel.token, setup.accountId, tunnel.id));
     });
   }
   const tunnelPath = `/accounts/${id(setup.accountId)}/cfd_tunnel/${id(owned.tunnelId)}`;

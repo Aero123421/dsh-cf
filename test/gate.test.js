@@ -18,9 +18,9 @@ async function until(check) {
   for (let i = 0; !check() && i < 200; i++) await new Promise(r => setTimeout(r, 10));
   assert(check(), 'condition did not complete');
 }
-function websocket(port) {
+function websocket(port, path = '/api/stream') {
   return new Promise((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path: '/api/stream', headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13' } });
+    const req = request({ host: '127.0.0.1', port, path, headers: { ...headers, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==', 'sec-websocket-version': '13' } });
     req.once('error', reject);
     req.once('upgrade', (response, socket) => { socket.on('error', () => {}); resolve({ status: response.statusCode, socket }); });
     req.once('response', response => { response.resume(); response.once('end', () => resolve({ status: response.statusCode })); });
@@ -247,6 +247,22 @@ test('upstream 503 and 401 are faults, while success and gate shutdown are not',
   const beforeClose = faults.length;
   await f.gate.close();
   assert.equal(faults.length, beforeClose);
+});
+test('a WebSocket upgrade 5xx keeps the earlier successful check', async t => {
+  const faults = [];
+  const f = await fixture(t, { onFault: event => faults.push(event) });
+  await f.activate();
+  const ws = await websocket(f.gate.port);
+  assert.equal(ws.status, 101);
+  assert.equal(f.evidence.includes('websocket'), true);
+  ws.socket.destroy();
+  const down = await websocket(f.gate.port, '/api/down').catch(() => ({ status: 0 }));
+  if (down.status) assert.equal(down.status, 503);
+  await until(() => faults.some(event => event.channel === 'websocket' && event.httpStatus === 503));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(faults.filter(event => event.httpStatus === 503), [{ status: 'upstream-failed', channel: 'websocket', httpStatus: 503 }]);
+  assert.equal(f.evidence.includes('websocket'), true);
+  assert.equal(faults.filter(event => event.status === 'upstream-failed' && event.httpStatus === undefined && event.channel === 'websocket').length, 0);
 });
 test('a later HTTP 5xx is forwarded without removing the earlier successful check', async t => {
   const faults = [];

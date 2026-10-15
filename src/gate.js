@@ -176,7 +176,7 @@ export class Gate {
       const transport = target.protocol === 'https:' ? httpsRequest : httpRequest;
       const request = transport({ ...target, method: 'GET', path: `${url.pathname}${url.search}`, headers: cleanHeaders(req.headers, { host: this.host, cookie, upgrade: true }) });
       let remote, reported = false, intentional = null;
-      const report = status => { if (reported || this.closing) return; reported = true; this.reportFault({ status, channel: 'websocket' }); };
+      const report = (status, extra) => { if (reported || this.closing) return; reported = true; this.reportFault({ status, channel: 'websocket', ...extra }); };
       const stop = kind => { if (kind) intentional = kind; socket.destroy(); remote?.destroy(); request.destroy(); };
       this.active.add(stop);
       const timer = setTimeout(() => stop('websocket-closed'), Math.max(1, Math.min(identity.expiresAt - Date.now(), this.maximumStreamMs))); timer.unref();
@@ -196,7 +196,9 @@ export class Gate {
       });
       request.once('response', response => {
         if (response.statusCode === 401) { this.adapter.invalidate(); report('auth-rejected'); }
+        else if (response.statusCode >= 500) report('upstream-failed', { httpStatus: response.statusCode });
         else report(intentional || 'upstream-failed');
+        if (!socket.destroyed) socket.write(`HTTP/1.1 ${response.statusCode} ${response.statusMessage || 'Error'}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
         response.resume(); stop();
       });
       request.once('error', () => { if (!socket.destroyed || intentional) report(intentional || 'upstream-failed'); stop(); }); request.end();

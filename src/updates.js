@@ -30,17 +30,49 @@ export function compareVersions(left, right) {
   }
   return 0;
 }
-/** Prereleases count, as in DSH app-boot. The updater also refuses `workspace:` specs and any range with no upper bound (`*`, `x`, `>=0`, a bare `>=`). */
-function boundedPeerRange(range) {
-  if (typeof range !== 'string' || range.includes('workspace:')) return false;
+/** Oldest and newest DSH this plugin will treat as the current series. */
+const DSH_SERIES_FLOOR = '0.2.1-alpha.2';
+const DSH_NEXT_SERIES = '0.3.0-0';
+
+function boundedComparator(item, direction) {
+  const exact = (item.operator === '' || item.operator === '=') && typeof item.semver?.version === 'string';
+  if (exact) return true;
+  if (direction === 'upper') return item.operator === '<' || item.operator === '<=';
+  return item.operator === '>' || item.operator === '>=';
+}
+
+/** A peer range stays in the current 0.2 series when every alternative has a
+ * lower and an upper comparator, nothing older than 0.2.1-alpha.2 matches,
+ * and nothing from 0.3.0-0 upward matches. `<99`, `^0`, and `<0.3.0` have a
+ * written cap and still reach the next series or the versions before this floor.
+ */
+function peerRangeInCurrentSeries(range) {
   let parsed;
   try { parsed = new semver.Range(range, { includePrerelease: true }); }
   catch { return false; }
-  return parsed.set.length > 0 && parsed.set.every(comparators => comparators.some(comparator => comparator.operator === '<' || comparator.operator === '<=' || (comparator.operator === '' && typeof comparator.semver?.version === 'string')));
+  if (!parsed.set?.length) return false;
+  const shaped = parsed.set.every(comparators =>
+    comparators.some(item => boundedComparator(item, 'lower')) &&
+    comparators.some(item => boundedComparator(item, 'upper')));
+  if (!shaped) return false;
+  const options = { includePrerelease: true };
+  try {
+    if (semver.intersects(range, `<${DSH_SERIES_FLOOR}`, options)) return false;
+    if (semver.intersects(range, `>=${DSH_NEXT_SERIES}`, options)) return false;
+  } catch { return false; }
+  return true;
 }
+
+/** Whether one DSH peer range accepts the running host.
+ * `semver.satisfies` includes prereleases. `workspace:` follows whatever is
+ * linked. A range is also rejected when its cap is only formal (`<99`, `^0`)
+ * or when it has no lower bound inside the current series.
+ */
 export function dshPeerSatisfies(version, range) {
-  if (typeof version !== 'string' || semver.valid(version) === null || !boundedPeerRange(range)) return false;
-  try { return semver.satisfies(version, range, { includePrerelease: true }); }
+  if (typeof version !== 'string' || semver.valid(version) === null || typeof range !== 'string') return false;
+  const text = range.trim();
+  if (text === '' || text.startsWith('workspace:') || !peerRangeInCurrentSeries(text)) return false;
+  try { return semver.satisfies(version, text, { includePrerelease: true }); }
   catch { return false; }
 }
 function object(value) { demand(value && typeof value === 'object' && !Array.isArray(value), 'UPDATE_METADATA', 'リリース情報を確認できません。'); return value; }
@@ -89,7 +121,7 @@ export async function checkedCandidate(channel, runtime, fetcher = fetch, signal
   demand(pkg.name === 'dsh-cf' && pkg.version === candidate.version && object(object(pkg.dsh).bundle).patch === './cordis.patch.yml' && pkg.exports?.['.'] === './src/index.js' && pkg.exports?.['./client'] === './src/client.js', 'UPDATE_METADATA', '対象プラグインと版を確認できません。');
   const peers = object(pkg.peerDependencies), ranges = Object.entries(peers).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'));
   demand(runtime && ranges.length && typeof peers['@deepseek-ai/dsh'] === 'string', 'UPDATE_COMPATIBILITY', '対応DSHの版を確認できません。手動更新先を確認してください。');
-  // Bounded ranges only. DSH boot still accepts `*`, `x`, `>=0`, and workspace protocols; this updater does not.
+  // The whole range must sit inside >=0.2.1-alpha.2 <0.3.0-0. DSH boot still accepts wider ranges.
   for (const [, range] of ranges) demand(typeof range === 'string' && dshPeerSatisfies(runtime, range), 'UPDATE_COMPATIBILITY', 'このリリースは使用中のDSHに対応していません。');
   return { candidate: { ...candidate, runtime }, status: 'available' };
 }

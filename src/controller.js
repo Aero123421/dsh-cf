@@ -306,7 +306,7 @@ export class Controller {
       }
       this.changed(); return;
     }
-    // A later HTTP 5xx on a channel that already succeeded does not undo that check.
+    // A later HTTP 5xx, including a WebSocket upgrade response, does not undo a check that already succeeded.
     if (event?.status === 'upstream-failed' && Number.isInteger(event.httpStatus) && event.httpStatus >= 500 && this.evidence[channel] === true) return;
     this.evidence[channel] = false;
     const rejected = event?.status === 'auth-rejected';
@@ -352,8 +352,14 @@ export class Controller {
     const running = !!(this.gate || this.connector);
     try { await this.deps.refreshTunnelToken(this.cf(), this.store, signal); }
     catch (error) {
-      if (!signal.aborted && running && error && typeof error === 'object') error.preserveRuntime = true;
-      throw error;
+      if (signal.aborted || !running) throw error;
+      // A frozen error cannot be marked in place. Wrap it so launch can keep the runtime.
+      const wrapped = error instanceof CfError
+        ? new CfError(error.code, error.message, error.details)
+        : new CfError('INTERNAL', 'The connector token could not be refreshed. The running gate and connector were left in place.');
+      wrapped.preserveRuntime = true;
+      wrapped.cause = error;
+      throw wrapped;
     }
     signal.throwIfAborted();
     if (this.gate && this.connector && this.binary) return this.restartConnector(signal);
