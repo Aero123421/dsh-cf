@@ -140,7 +140,7 @@ test('a public page and an in-progress authorization render their links', async 
   };
   const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8');
   const status = {
-    sequence: 2, phase: 'rechecking', authorized: true, busy: false, hostReview: null, version: '0.1.0-alpha.4', autoConnect: false,
+    sequence: 2, phase: 'rechecking', authorized: true, busy: false, hostReview: null, version: '0.1.0-alpha.5', autoConnect: false,
     instanceId: '11111111-1111-4111-8111-111111111111', error: null, pendingWrite: null, binary: null,
     accounts: [{ id: 'a'.repeat(32), name: 'Example' }],
     account: { accountId: 'a'.repeat(32), mfa: 'substitute', mfaMissing: [], zones: [{ id: 'b'.repeat(32), name: 'example.com' }], idps: [{ id: 'provider-1', name: 'Email' }], teamDomain: 'team.example.com', organizationRevision: 'rev' },
@@ -166,7 +166,7 @@ test('a public page and an in-progress authorization render their links', async 
       return { rpc: { async call(_path, method) {
         if (method === 'status') return { ok: true, value: status };
         if (method === 'oauth/attempt') return { ok: true, value: { phase: 'waiting', attempt: 4, authorizationUrl: 'http://127.0.0.1:8789/oauth-preview', redirectUri: 'http://127.0.0.1:8789/dsh-cf/oauth/callback', expiresAt: status.oauth.expiresAt } };
-        if (String(method).startsWith('update-')) return { ok: true, value: { status: 'current', running: '0.1.0-alpha.4', channel: 'prerelease', profileKey: 'ab'.repeat(32) } };
+        if (String(method).startsWith('update-')) return { ok: true, value: { status: 'current', running: '0.1.0-alpha.5', channel: 'prerelease', profileKey: 'ab'.repeat(32) } };
         return { ok: true, value: {} };
       } } };
     },
