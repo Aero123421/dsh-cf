@@ -1,4 +1,5 @@
 import test from 'node:test';
+import semver from 'semver';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, rm, access, mkdir, writeFile } from 'node:fs/promises';
@@ -86,7 +87,7 @@ test('updater routes require the original management peer, Host and Origin after
   assert.equal(status.version, VERSION); assert.equal(status.phase, 'idle');
 });
 test('actual updater RPC preserves disabled state and busy responses while cloud state stays unchanged', async t => {
-  const version = '0.1.0-alpha.7'; let complete, entered;
+  const version = semver.inc(VERSION, 'prepatch', 'test'); let complete, entered;
   const started = new Promise(resolve => { entered = resolve; });
   const calls = [], bundle = { name: 'dsh-cf', installed: true, enabled: false, version: '0.1.0-alpha.5', source: 'github:Aero123421/dsh-cf#v0.1.0-alpha.5' };
   const manager = { listBundles: async () => [bundle], waitForInstall: async () => null, installBundle: async (spec, options) => { calls.push({ spec, options }); entered(); return new Promise(resolve => { complete = resolve; }); } };
@@ -124,7 +125,7 @@ test('state-changing and secret-returning actions require a management peer befo
   const seen = [];
   const route = rpcRoute({ requestRejection: () => undefined }, async endpoint => { seen.push(endpoint); return { ok: true, value: endpoint === 'status' ? { phase: 'idle' } : { authorizationUrl: secret } }; });
   const respond = () => ({ status: 0, body: '', headersSent: false, writeHead(status) { this.status = status; this.headersSent = true; }, end(body = '') { this.body = body; }, setHeader() {} });
-  const endpoints = ['oauth/start', 'oauth/finish', 'oauth/cancel', 'oauth/attempt', 'token/refresh', 'forget', 'remove', 'start', 'resume', 'mfa/enable', 'authorize', 'account', 'host/confirm', 'autoconnect', 'stop', 'cancel', 'update-status', 'update-check', 'update-install', 'nope'];
+  const endpoints = ['pending/inspect', 'oauth/start', 'oauth/finish', 'oauth/cancel', 'oauth/attempt', 'token/refresh', 'forget', 'remove', 'start', 'resume', 'mfa/enable', 'authorize', 'account', 'host/confirm', 'autoconnect', 'stop', 'cancel', 'update-status', 'update-check', 'update-install', 'nope'];
   for (const endpoint of endpoints) {
     const res = respond();
     await route.handler({

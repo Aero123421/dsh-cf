@@ -6,6 +6,32 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const COPY = {
       "en": {
+        "errorRestarted": "DSH restarted. Wait for its status to refresh, then retry.",
+        "openWide": "Open full-width settings",
+        "closeWide": "Return to settings",
+        "identityLocked": "To change the account, domain, hostname, email, or login method, delete this instance’s public settings first. Authentication mode can be changed below.",
+        "inspectWrite": "Check the write result (read only)",
+        "recoveryGuide": "Open the recovery guide",
+        "inspect_found": "Matching resources were found. The checkpoint stays in place. Compare these IDs with the recovery guide before taking any action.",
+        "inspect_not-found": "No exact match was found. This does not prove that the write failed. The checkpoint stays in place; follow the recovery guide.",
+        "inspect_ambiguous": "The result is ambiguous or differs from the recorded ID. Keep publication stopped and follow the recovery guide.",
+        "errorGeneral": "The operation could not be confirmed. Check the connection to DSH and retry from the local settings.",
+        "errorAuthorize": "Cloudflare setup authorization is missing, expired, or invalid. Check the API token permissions or start authorization again.",
+        "errorCloudflare": "Cloudflare could not confirm the request. Check DNS, connectivity, and token permissions. Inspect an unknown write before retrying it.",
+        "errorConnector": "The connection software could not be prepared or connected. Check its absolute path, supported version, download permission, and network access.",
+        "errorDsh": "DSH could not be reached or authenticated. Check its loopback listener and reconnect from the local settings.",
+        "errorDshConfig": "DSH could not save or activate the trusted hostname. Check profile overrides; add this hostname with --trusted-host or to the overriding patch, then retry.",
+        "errorStorage": "Local credentials or state could not be verified. Check file permissions and stop any other DSH using this profile before retrying.",
+        "errorSetup": "The saved settings or input need attention. Check the selected account, domain, hostname, email, and login method. Finish initial setup before reconnecting.",
+        "errorMfa": "Additional verification could not be confirmed. Reload the account and review its WebAuthn and identity-provider MFA settings.",
+        "errorResource": "The Cloudflare resource differs from this instance’s expected configuration. Review the dedicated resource before reconnecting; do not overwrite unrelated resources.",
+        "errorCancelled": "The operation was cancelled or timed out. Check its current state before retrying.",
+        "download_metadata": "Checking the official release",
+        "download_downloading": "Downloading",
+        "download_verified": "Checksum verified",
+        "tokenCreate": "Create an API token",
+        "tokenGuide": "Required permissions and setup guide",
+
         "helpBody": "If the hostname cannot be found, check DNS on the device opening it. If login fails, use the allowed email address. Setup changes require the local management connection.",
         "loginHint": "Open the link and sign in. Connection checks run automatically.",
         "publicAddress": "Your DSH address",
@@ -47,7 +73,7 @@ window.__ModuleLoader__.load({
         "stepsLabel": "Connection checks",
         "remoteNotice": "This public connection can only show status. Change or stop Cloudflare settings from the original local or SSH DSH connection.",
         "connectionError": "Checking the connection to DSH. It returns automatically while settings reload.",
-        "pendingWrite": "The previous API create has an unknown result. Publication is stopped so a duplicate is not created. See “Recovering an unknown write” in the README.",
+        "pendingWrite": "The previous API write has an unknown result. Publication is stopped. Use the read-only result check and follow the recovery guide before retrying.",
         "failed": "The request failed.",
         "hostTitle": "Confirm that you want to keep using this computer",
         "hostBody": "This profile was opened with a different hostname or user than last time. That also happens after a macOS network change or a recreated container. Using a copied profile on another computer at the same time would attach two DSH processes to one Tunnel, and traffic could arrive at either of them. Connection and auto-connect stay off until you confirm.",
@@ -55,7 +81,7 @@ window.__ModuleLoader__.load({
         "hostContinue": "Keep using this DSH",
         "cardAuthorize": "Cloudflare account access",
         "authorizedHint": "Cloudflare is authorized for setup.",
-        "unauthorizedHint": "A management authorization is required only for the first setup and for deletion.",
+        "unauthorizedHint": "Management authorization is required for initial setup, settings changes, and deletion.",
         "oauthStart": "Authorize with Cloudflare",
         "forgetGrant": "Clear setup authorization",
         "oauthWaitingTitle": "Allow the request in the browser",
@@ -189,6 +215,32 @@ window.__ModuleLoader__.load({
         "footer": "dsh-cf · Developer preview · A connection for an owner who trusts Cloudflare. Turning MFA off or revoking a session on the Cloudflare side is not guaranteed to be detected immediately."
       },
       "ja": {
+        "errorRestarted": "DSHを再起動しました。状態の再取得を待ってから操作し直してください。",
+        "openWide": "設定を広く表示",
+        "closeWide": "設定画面に戻る",
+        "identityLocked": "アカウント・ドメイン・ホスト名・メール・ログイン方法を変更する場合は、この公開設定を先に削除してください。追加認証の有無は下で変更できます。",
+        "inspectWrite": "書き込み結果を確認（読み取り専用）",
+        "recoveryGuide": "復旧手順を開く",
+        "inspect_found": "一致するリソースが見つかりました。不明な書き込みの記録は維持しています。IDを復旧手順と照合してから操作してください。",
+        "inspect_not-found": "完全一致するリソースは見つかりませんでした。書き込み失敗を断定する結果ではありません。記録を維持したまま復旧手順で確認してください。",
+        "inspect_ambiguous": "候補が複数あるか、記録したIDと異なります。公開を止めたまま復旧手順で確認してください。",
+        "errorGeneral": "処理結果を確認できませんでした。DSHへの接続を確認し、ローカルの設定画面から再試行してください。",
+        "errorAuthorize": "Cloudflareの設定用認可が未完了・期限切れ・無効です。APIトークンの権限を確認するか、認可をやり直してください。",
+        "errorCloudflare": "Cloudflareで要求を確認できませんでした。DNS・通信・トークン権限を確認してください。書き込み結果が不明な場合は、再送前に結果を確認してください。",
+        "errorConnector": "接続ソフトの準備または接続に失敗しました。実行ファイルの絶対パス・対応版・取得許可・ネットワークを確認してください。",
+        "errorDsh": "DSHとの通信または認証を確認できませんでした。localhostの待受を確認し、ローカルの設定画面から再接続してください。",
+        "errorDshConfig": "公開ホスト名の信頼設定を保存・反映できませんでした。profileの上書きを確認し、--trusted-hostまたは上書き側のpatchへ対象ホスト名を追加して再試行してください。",
+        "errorStorage": "ローカルの資格情報・保存状態を確認できませんでした。ファイル権限を確認し、同じprofileを使う別のDSHを止めて再試行してください。",
+        "errorSetup": "入力または保存設定の確認が必要です。アカウント・ドメイン・ホスト名・本人メール・ログイン方法を確認してください。初回設定を完了してから再接続します。",
+        "errorMfa": "追加認証の設定を確認できませんでした。アカウントを再読込し、WebAuthnとIdP側MFAの代替設定を確認してください。",
+        "errorResource": "Cloudflare上の専用リソースが想定する設定と異なります。対象リソースを確認してから再接続してください。無関係のリソースは上書きしないでください。",
+        "errorCancelled": "処理を取り消したか、時間切れになりました。現在の状態を確認してから再試行してください。",
+        "download_metadata": "公式リリースを確認中",
+        "download_downloading": "取得中",
+        "download_verified": "チェックサム確認済み",
+        "tokenCreate": "APIトークンを作成",
+        "tokenGuide": "必要権限と設定手順",
+
         "helpBody": "「サイトが見つかりません」は、開いている端末のDNS設定を確認してください。ログインできないときは許可したメールアドレスを確認します。設定変更にはローカルの管理用接続が必要です。",
         "loginHint": "このURLを開いてログインしてください。接続確認は自動で行います。",
         "publicAddress": "公開URL",
@@ -230,7 +282,7 @@ window.__ModuleLoader__.load({
         "stepsLabel": "接続の確認工程",
         "remoteNotice": "この公開接続では状態確認だけができます。Cloudflare設定の変更・停止は、元のローカルまたはSSH経由のDSH接続で行ってください。",
         "connectionError": "DSHとの接続を確認しています。設定の再読込中は自動で復帰します。",
-        "pendingWrite": "前回のAPI作成結果が不明です。重複作成を防ぐため停止しています。READMEの「不明な書き込みの復旧」を確認してください。",
+        "pendingWrite": "前回のAPI書き込み結果が不明なため公開を停止しています。読み取り専用の結果確認と復旧手順を使い、再送前に確認してください。",
         "failed": "処理に失敗しました。",
         "hostTitle": "このPCで使い続けるか確認してください",
         "hostBody": "この設定は、前回と違うホスト名またはユーザーで開かれました。macOSのネットワーク変更やコンテナの再作成でも起こります。別のPCへコピーした設定を同時に使うと、同じTunnelに2台のDSHがつながり、通信がどちらへ届くか分からなくなります。そのため確認するまで接続と自動接続を止めています。",
@@ -238,7 +290,7 @@ window.__ModuleLoader__.load({
         "hostContinue": "このDSHで使い続ける",
         "cardAuthorize": "Cloudflareへの接続許可",
         "authorizedHint": "設定に必要なCloudflareの認可は完了しています。",
-        "unauthorizedHint": "初回設定・削除のときだけ管理用の認可が必要です。",
+        "unauthorizedHint": "初回設定・設定変更・削除には管理用の認可が必要です。",
         "oauthStart": "Cloudflare で認可",
         "forgetGrant": "設定用の認可を解除",
         "oauthWaitingTitle": "ブラウザで許可してください",
@@ -372,6 +424,32 @@ window.__ModuleLoader__.load({
         "footer": "dsh-cf · Developer preview · Cloudflareを信頼する所有者向けの接続です。Cloudflare側のMFA解除や失効を即座に検出する保証はありません。"
       },
       "zh": {
+        "errorRestarted": "DSH 已重启。请等待状态刷新后重试。",
+        "openWide": "展开设置",
+        "closeWide": "返回设置",
+        "identityLocked": "更改账户、域名、主机名、邮箱或登录方式前，请先删除此实例的公开设置。额外验证可在下方更改。",
+        "inspectWrite": "检查写入结果（只读）",
+        "recoveryGuide": "打开恢复指南",
+        "inspect_found": "找到了匹配的资源。未知写入记录保持不变。操作前请按恢复指南核对这些 ID。",
+        "inspect_not-found": "未找到完全匹配的资源。这不能证明写入失败。请保留记录，按恢复指南确认。",
+        "inspect_ambiguous": "存在多个候选资源或 ID 与记录不同。请保持停止公开，按恢复指南确认。",
+        "errorGeneral": "无法确认处理结果。请检查与 DSH 的连接，并从本地设置重试。",
+        "errorAuthorize": "Cloudflare 设置授权未完成、已过期或无效。请检查 API 令牌权限或重新授权。",
+        "errorCloudflare": "无法在 Cloudflare 确认请求。请检查 DNS、网络和令牌权限。写入结果不明时，请先检查结果再重试。",
+        "errorConnector": "无法准备或连接接入软件。请检查绝对路径、支持版本、下载许可和网络。",
+        "errorDsh": "无法连接或验证 DSH。请检查 localhost 监听，并从本地设置重新连接。",
+        "errorDshConfig": "无法保存或应用主机信任设置。请检查配置覆盖，将主机名加入 --trusted-host 或覆盖的 patch 后重试。",
+        "errorStorage": "无法确认本地凭据或保存状态。请检查文件权限，并停止使用相同配置的其他 DSH 后重试。",
+        "errorSetup": "请检查输入和保存的账户、域名、主机名、所有者邮箱及登录方式。完成初始设置后再重新连接。",
+        "errorMfa": "无法确认额外验证设置。请重新读取账户，并检查 WebAuthn 与 IdP MFA 替代设置。",
+        "errorResource": "Cloudflare 专用资源与预期配置不同。请检查后再重新连接，不要覆盖无关资源。",
+        "errorCancelled": "操作已取消或超时。请确认当前状态后再重试。",
+        "download_metadata": "正在检查官方发布",
+        "download_downloading": "正在下载",
+        "download_verified": "校验和已确认",
+        "tokenCreate": "创建 API 令牌",
+        "tokenGuide": "所需权限与设置指南",
+
         "helpBody": "找不到主机名时，请检查访问设备的 DNS。无法登录时，请检查允许的邮箱。修改设置需要本地管理连接。",
         "loginHint": "打开网址并登录。连接验证会自动完成。",
         "publicAddress": "公开网址",
@@ -413,7 +491,7 @@ window.__ModuleLoader__.load({
         "stepsLabel": "连接确认步骤",
         "remoteNotice": "这条公开连接只能查看状态。请从原来的本地或 SSH DSH 连接更改或停止 Cloudflare 设置。",
         "connectionError": "正在确认与 DSH 的连接。设置重新加载期间会自动恢复。",
-        "pendingWrite": "上一次 API 创建的结果不明。为避免重复创建，已停止公开。请查看 README 中的“不明写入的恢复”。",
+        "pendingWrite": "上一次 API 写入结果不明，已停止公开。请先使用只读结果检查并按恢复指南确认，再重试。",
         "failed": "处理失败。",
         "hostTitle": "请确认是否继续在这台电脑上使用",
         "hostBody": "此配置上次使用的主机名或用户与现在不同。macOS 网络变化或重建容器时也会出现。若同时在另一台电脑上使用复制的配置，两个 DSH 会连到同一个 Tunnel，通信可能到达其中任意一个。确认之前，连接和自动连接保持关闭。",
@@ -421,7 +499,7 @@ window.__ModuleLoader__.load({
         "hostContinue": "继续使用这个 DSH",
         "cardAuthorize": "Cloudflare 授权",
         "authorizedHint": "Cloudflare 设置授权已完成。",
-        "unauthorizedHint": "只有初次设置和删除时需要管理授权。",
+        "unauthorizedHint": "初始设置、更改设置和删除时需要管理授权。",
         "oauthStart": "通过 Cloudflare 授权",
         "forgetGrant": "清除设置授权",
         "oauthWaitingTitle": "请在浏览器中允许",
@@ -562,6 +640,43 @@ window.__ModuleLoader__.load({
       if (!params) return template;
       return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
     }
+    // Sequence numbers are scoped to one Host lifetime. Retired lifetimes cannot repaint a newer one.
+    class SnapshotCursor {
+      constructor() { this.generation = null; this.sequence = -1; this.retired = new Set(); }
+      accept(value) {
+        if (!Number.isSafeInteger(value.sequence) || value.sequence < 0) return null;
+        const generation = typeof value.generation === 'string' ? value.generation : null;
+        if (generation && this.retired.has(generation) || !generation && this.generation) return null;
+        const replaced = this.generation !== null && generation !== this.generation;
+        if (generation !== this.generation) {
+          if (this.generation) this.retired.add(this.generation);
+          this.generation = generation; this.sequence = -1;
+        }
+        if (value.sequence < this.sequence) return null;
+        this.sequence = value.sequence;
+        return replaced ? 'replaced' : 'accepted';
+      }
+    }
+    function errorMessage(t, error) {
+      const code = typeof error?.code === 'string' && /^(?:[A-Z][A-Z0-9_]{0,50}|AbortError|TimeoutError)$/.test(error.code) ? error.code : '';
+      let key = 'errorGeneral';
+      if (/^(?:AUTHORIZE|API_TOKEN|OAUTH_)/.test(code)) key = 'errorAuthorize';
+      if (/^(?:CF_|EDGE_CHECK|UNPROTECTED)/.test(code)) key = 'errorCloudflare';
+      if (/^(?:BINARY_|DOWNLOAD|ARCHIVE|PLATFORM|CONNECTOR)/.test(code)) key = 'errorConnector';
+      if (/^DSH_/.test(code)) key = 'errorDsh';
+      if (code === 'DSH_CONFIG') key = 'errorDshConfig';
+      if (/^(?:STATE_|LOCK|TOKEN)/.test(code)) key = 'errorStorage';
+      if (/^(?:SETUP|HOSTNAME|OWNER|ZONE|IDP|ID|CONSENT)/.test(code)) key = 'errorSetup';
+      if (/^(?:MFA_|ORG_CHANGED)/.test(code)) key = 'errorMfa';
+      if (/^(?:ACCESS_|POLICY_|SESSION_|TUNNEL_|DNS_)/.test(code)) key = 'errorResource';
+      if (code === 'SETUP_CHANGED') key = 'identityLocked';
+      if (code === 'WRITE_UNKNOWN') key = 'pendingWrite';
+      if (code === 'HOST_REVIEW') key = 'blockerHost';
+      if (code === 'STALE_HOST') key = 'errorRestarted';
+      if (code === 'BUSY' || code === 'STOPPED') key = 'blockerBusy';
+      if (code === 'AbortError' || code === 'TimeoutError') key = 'errorCancelled';
+      return t(key) + (code ? ` (${code})` : '');
+    }
     function hostnameOk(value) {
       if (typeof value !== 'string' || value.length === 0 || value.length > 253 || value !== value.trim()) return false;
       const host = value.toLowerCase();
@@ -575,6 +690,7 @@ window.__ModuleLoader__.load({
       if (input.remote) return 'remote';
       if (input.stopping) return 'stopping';
       if (input.hostReview) return 'host';
+      if (input.pendingWrite) return 'unknown-write';
       if (!input.authorized) return 'authorize';
       if (!input.accountId || !input.accountReady) return 'account';
       if (input.requireWebAuthn !== false && input.mfa === 'substitute') return 'mfa-substitute';
@@ -590,14 +706,16 @@ window.__ModuleLoader__.load({
     const BLOCKER_KEY = {
       remote: 'blockerRemote', stopping: 'blockerStopping', host: 'blockerHost', authorize: 'blockerAuthorize', account: 'blockerAccount',
       'mfa-substitute': 'blockerMfaSubstitute', 'mfa-unknown': 'blockerMfaUnknown', 'mfa-missing': 'blockerMfaMissing',
+      'unknown-write': 'pendingWrite',
       zone: 'blockerZone', idp: 'blockerIdp', hostname: 'blockerHostname', email: 'blockerEmail', busy: 'blockerBusy',
     };
     const CSS = `
-.dcf{--cf-line:var(--dsw-alias-border,rgba(127,127,127,.25));--cf-soft:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.05));--cf-accent:var(--dsw-alias-accent,#315fba);container-type:inline-size;min-width:0;max-width:720px;padding:8px 4px 32px;font:inherit;line-height:1.6;color:inherit}
+.dcf{--cf-line:var(--dsw-alias-border-l2,rgba(127,127,127,.25));--cf-soft:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.05));--cf-accent:var(--dsw-alias-brand-primary,#315fba);box-sizing:border-box;container-type:inline-size;min-width:0;max-width:720px;padding:8px 4px 32px;font:inherit;line-height:1.6;color:inherit}
+.dcf-dialog{position:fixed;inset:0;margin:auto;width:calc(100vw - 24px);max-width:744px;max-height:calc(100dvh - 24px);padding:20px;overflow:auto;border:1px solid var(--cf-line);border-radius:12px;background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222)}.dcf-dialog::backdrop{background:rgba(0,0,0,.4)}.dcf .expand{display:none}@container(max-width:320px){.dcf .expand{display:inline-block}}
 .dcf *{box-sizing:border-box}.dcf h2{font-size:20px;margin:0}.dcf h3{font-size:14px;margin:0 0 12px}.dcf p{margin:8px 0}.dcf small,.dcf .hint{opacity:.76;font-size:12px}.dcf .head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:12px}.dcf .status{font-size:12px;padding-top:4px}.dcf .card{padding:20px 0;border-bottom:1px solid var(--cf-line)}
 .dcf .public-link{padding:12px 0 24px;border-bottom:1px solid var(--cf-line)}.dcf .url{display:block;font:inherit;font-size:20px;font-weight:600;color:inherit;overflow-wrap:anywhere}.dcf .settings>summary{font-size:14px;font-weight:600;padding:12px 0}
 .dcf .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.dcf label.field{display:flex;flex-direction:column;gap:5px;font-size:12px;font-weight:600;min-width:0}.dcf input:not([type=checkbox]),.dcf select,.dcf textarea{font:inherit;font-weight:400;color:inherit;background:transparent;border:1px solid var(--cf-line);border-radius:5px;padding:9px 10px;min-width:0;width:100%}.dcf textarea{min-height:74px;resize:vertical}
-.dcf input:focus-visible,.dcf select:focus-visible,.dcf textarea:focus-visible,.dcf button:focus-visible,.dcf a:focus-visible,.dcf summary:focus-visible{outline:2px solid var(--cf-accent);outline-offset:3px}.dcf .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}.dcf button,.dcf a.button{font:inherit;font-size:12px;line-height:1.4;border:1px solid var(--cf-line);border-radius:5px;padding:9px 12px;background:transparent;color:inherit;cursor:pointer;text-decoration:none}.dcf button.primary,.dcf a.primary{background:var(--cf-accent);color:#fff;border-color:transparent;font-weight:600}.dcf button:disabled{opacity:.45;cursor:not-allowed}
+.dcf input:focus-visible,.dcf select:focus-visible,.dcf textarea:focus-visible,.dcf button:focus-visible,.dcf a:focus-visible,.dcf summary:focus-visible{outline:2px solid var(--cf-accent);outline-offset:3px}.dcf .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}.dcf button,.dcf a.button{font:inherit;font-size:12px;line-height:1.4;border:1px solid var(--cf-line);border-radius:5px;padding:9px 12px;background:transparent;color:inherit;cursor:pointer;text-decoration:none}.dcf button.primary,.dcf a.primary{background:var(--cf-accent);color:var(--dsw-alias-brand-primary-invert,#fff);border-color:transparent;font-weight:600}.dcf button:disabled{opacity:.45;cursor:not-allowed}
 .dcf .notice{border-left:2px solid var(--cf-line);padding:8px 12px;margin:12px 0;background:var(--cf-soft);font-size:12px;overflow-wrap:anywhere}.dcf .reason{font-size:12px}.dcf .check{display:flex;gap:8px;align-items:flex-start;font-size:12px;margin:12px 0}.dcf .check input{margin-top:5px;flex-shrink:0}.dcf details{margin-top:14px}.dcf summary{font-size:12px;cursor:pointer}.dcf code{font:12px ui-monospace,monospace;overflow-wrap:anywhere}.dcf progress{width:100%;accent-color:var(--cf-accent)}
 @media(max-width:580px){.dcf .grid{grid-template-columns:1fr}.dcf .head{display:block}}@container(max-width:580px){.dcf .grid{grid-template-columns:1fr}.dcf .head{display:block}.dcf .url{font-size:18px}}
 `;
@@ -610,6 +728,15 @@ window.__ModuleLoader__.load({
     function anchor(label, url, primary = false) {
       if (!url) return null;
       return h('a', { className: `button ${primary ? 'primary' : ''}`, href: url, target: '_blank', rel: 'noopener noreferrer' }, label);
+    }
+    function dialogKey(event) {
+      event.stopPropagation();
+      if (event.key !== 'Tab') return;
+      const nodes = [...event.currentTarget.querySelectorAll('a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]')].filter(node => node.getClientRects().length);
+      const first = nodes[0], last = nodes.at(-1), active = document.activeElement;
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && active === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
     }
     const UPDATE_STATUSES = ['idle', 'checking', 'available', 'current', 'no-release', 'channel-empty', 'incompatible', 'unavailable', 'installing', 'unknown', 'restart-required', 'applied', 'confirmed', 'overridden', 'failed', 'cancelled'];
     const UPDATE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -677,6 +804,9 @@ window.__ModuleLoader__.load({
           if (epoch !== this.epoch || this.stopping) return { dropped: true };
           this.onStatus?.(status);
           return { value, status };
+        } catch (error) {
+          if (epoch !== this.epoch || this.stopping) return { dropped: true };
+          throw error;
         } finally { if (epoch === this.epoch) { this.busy = false; this.touch(); } }
       }
       async control(name) {
@@ -689,6 +819,9 @@ window.__ModuleLoader__.load({
           if (epoch !== this.epoch) return { dropped: true };
           this.onStatus?.(status);
           return { status };
+        } catch (error) {
+          if (epoch !== this.epoch) return { dropped: true };
+          throw error;
         } finally { if (epoch === this.epoch) { this.stopping = false; this.busy = false; this.touch(); } }
       }
     }
@@ -697,8 +830,14 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (remote) return;
         void updates.status();
-        const timer = setInterval(() => { if (!updates.busy) void updates.status(); }, 2000);
-        return () => clearInterval(timer);
+        let closed = false, timer;
+        const refresh = async () => {
+          const active = ['installing', 'unknown', 'applied', 'restart-required'].includes(updates.getSnapshot().status);
+          if (!document.hidden && !updates.busy && active) await updates.status();
+          if (!closed) timer = setTimeout(refresh, active && !document.hidden ? 2000 : 30_000);
+        };
+        timer = setTimeout(refresh, 2000);
+        return () => { closed = true; clearTimeout(timer); };
       }, [updates, remote]);
       const busy = !view.profileKey || ['checking', 'installing', 'unknown', 'restart-required'].includes(view.status);
       const running = view.running === '—' ? version || '—' : view.running;
@@ -731,25 +870,39 @@ window.__ModuleLoader__.load({
       const [hostOk, setHostOk] = React.useState(false);
       const [deleteName, setDeleteName] = React.useState('');
       const [copied, setCopied] = React.useState(false);
+      const [wide, setWide] = React.useState(false);
+      const [inspection, setInspection] = React.useState(null);
+      const dialog = React.useRef(null), expandButton = React.useRef(null), wasWide = React.useRef(false), cursor = React.useRef(new SnapshotCursor());
       const [, setTick] = React.useState(0);
       const attemptedAccount = React.useRef(null), suggestedHostname = React.useRef('');
-      const mounted = React.useRef(true), seeded = React.useRef(false), seen = React.useRef(0), linkRef = React.useRef(null);
+      const mounted = React.useRef(true), seeded = React.useRef(false), linkRef = React.useRef(null);
       const session = React.useRef(null);
       if (!session.current) session.current = new PanelSession(async (name, payload) => {
-        const result = await connection.rpc.call('/dsh-cf', name, payload);
-        if (!result?.ok) { const failure = new Error(result?.error?.message || ''); failure.fallback = !result?.error?.message; throw failure; }
+        const result = await connection.rpc.call('/dsh-cf', name, { ...payload, ...(cursor.current.generation ? { generation: cursor.current.generation } : {}) });
+        if (!result?.ok) { const failure = new Error('settings-request'); failure.code = result?.error?.code; throw failure; }
         return result.value;
       });
       const merge = value => {
         if (!mounted.current || !value) return;
-        if (typeof value.sequence === 'number' && value.sequence < seen.current) return;
-        if (typeof value.sequence === 'number') seen.current = value.sequence;
+        const accepted = cursor.current.accept(value);
+        if (!accepted) return;
+        if (accepted === 'replaced') {
+          ++session.current.epoch; session.current.busy = false; session.current.stopping = false;
+          seeded.current = false; linkRef.current = null; attemptedAccount.current = null;
+          setToken(''); setCallback(''); setLink(null); setInspection(null); setError('');
+          if (/^(?:localhost|\[?::1\]?|127\.\d+\.\d+\.\d+)$/.test(window.location.hostname)) void updates.status();
+          setForm({ accountId: '', zoneId: '', hostname: '', ownerEmail: '', idpId: '', cloudflaredPath: '', allowDownload: false, requireWebAuthn: false });
+        }
         if (linkRef.current && value.oauth && value.oauth.attempt < linkRef.current.attempt) value = { ...value, oauth: { ...value.oauth, phase: 'waiting', attempt: linkRef.current.attempt, expiresAt: linkRef.current.expiresAt } };
         setState(value);
         if (!seeded.current) { seeded.current = true; if (value.setup) setForm(f => ({ ...f, ...value.setup, requireWebAuthn: value.setup.requireWebAuthn !== false })); setClientId(value.oauth.clientId); setScopes(value.oauth.scopes.join(' ')); }
       };
       session.current.onChange = () => { if (mounted.current) setTick(n => n + 1); };
       session.current.onStatus = value => { if (mounted.current) { merge(value); setConnectionError(''); } };
+      React.useEffect(() => {
+        if (wide) { wasWide.current = true; const node = dialog.current; node?.showModal(); return () => node?.close(); }
+        if (wasWide.current) { expandButton.current?.focus(); wasWide.current = false; }
+      }, [wide]);
       const pending = session.current.busy, stopping = session.current.stopping;
       React.useEffect(() => {
         mounted.current = true; let cancelled = false, timer;
@@ -778,18 +931,19 @@ window.__ModuleLoader__.load({
       async function run(name, payload, after) {
         setError('');
         try { await session.current.mutate(name, payload, after); }
-        catch (e) { if (mounted.current) setError(e.fallback || !e.message ? t('failed') : e.message); }
+        catch (e) { if (mounted.current) setError(errorMessage(t, e)); }
       }
       async function control(name) {
         setError('');
         try { await session.current.control(name); }
-        catch (e) { if (mounted.current) setError(e.fallback || !e.message ? t('failed') : e.message); }
+        catch (e) { if (mounted.current) setError(errorMessage(t, e)); }
       }
       const change = key => value => setForm(f => ({ ...f, [key]: value }));
       const locked = remote || pending || stopping || state?.busy;
+      const identityLocked = locked || !!state?.setup;
       const account = state?.account?.accountId === form.accountId ? state.account : null;
       const ready = state?.phase === 'ready';
-      const blocker = connectBlockers({ remote, pending, busy: state?.busy, stopping, hostReview: !!state?.hostReview, authorized: !!state?.authorized, accountId: form.accountId, accountReady: !!account, requireWebAuthn: form.requireWebAuthn, mfa: account?.mfa, mfaMissing: account?.mfaMissing, zoneId: form.zoneId, idpId: form.idpId, hostname: form.hostname, ownerEmail: form.ownerEmail });
+      const blocker = connectBlockers({ remote, pending, pendingWrite: !!state?.pendingWrite, busy: state?.busy, stopping, hostReview: !!state?.hostReview, authorized: !!state?.authorized, accountId: form.accountId, accountReady: !!account, requireWebAuthn: form.requireWebAuthn, mfa: account?.mfa, mfaMissing: account?.mfaMissing, zoneId: form.zoneId, idpId: form.idpId, hostname: form.hostname, ownerEmail: form.ownerEmail });
       const phaseLabel = PHASE_KEY[state?.phase] ? t(PHASE_KEY[state.phase]) : t('loading');
       const reach = state?.reachability?.status === 'upstream-failed' || state?.phase === 'degraded' && state?.error?.code === 'DSH_UPSTREAM' ? t('reachUpstream')
         : state?.reachability?.status === 'auth-rejected' || state?.error?.code === 'DSH_AUTH' ? t('reachAuth')
@@ -821,15 +975,19 @@ window.__ModuleLoader__.load({
       }, [account, form.zoneId]);
       async function copyUrl() { try { await navigator.clipboard.writeText(state.publicUrl); setCopied(true); } catch { setError(t('copyFailed')); } }
       const button = (text, name, payload = {}, options = {}) => h('button', { type: 'button', className: options.className, disabled: locked || options.disabled, onClick: () => void run(name, payload, options.after) }, text);
-      return h('section', { className: 'dcf', 'aria-label': t('nav') },
+      return h(wide ? 'dialog' : 'section', { ref: wide ? dialog : undefined, className: wide ? 'dcf dcf-dialog' : 'dcf', 'aria-label': t('nav'), onKeyDown: wide ? dialogKey : undefined, onCancel: wide ? e => { e.preventDefault(); e.stopPropagation(); setWide(false); } : undefined },
         h('style', null, CSS),
+        h('button', { type: 'button', ref: expandButton, className: wide ? '' : 'expand', onClick: () => setWide(!wide) }, t(wide ? 'closeWide' : 'openWide')),
         h('div', { className: 'head' }, h('div', null, h('h2', null, t('headline')), h('p', { className: 'hint' }, t('lede'))), h('span', { className: 'status', role: 'status', 'aria-live': 'polite' }, phaseLabel)),
         remote ? h('div', { className: 'notice' }, t('remoteNotice')) : null,
         error ? h('div', { className: 'notice', role: 'alert' }, error) : null,
         connectionError ? h('div', { className: 'notice', role: 'status' }, connectionError) : null,
         reach ? h('div', { className: 'notice', role: 'status' }, reach) : null,
-        state?.error && !reach ? h('div', { className: 'notice', role: 'alert' }, state.error.message) : null,
-        state?.pendingWrite ? h('div', { className: 'notice' }, t('pendingWrite')) : null,
+        state?.error && !reach ? h('div', { className: 'notice', role: 'alert' }, errorMessage(t, state.error)) : null,
+        state?.pendingWrite ? h('div', { className: 'notice' }, t('pendingWrite'),
+          !remote ? h('div', { className: 'actions' }, button(t('inspectWrite'), 'pending/inspect', {}, { disabled: !state.authorized, after: value => setInspection(value) })) : null,
+          inspection ? h('div', { role: 'status' }, h('p', null, t('inspect_' + inspection.status)), h('p', null, h('code', null, inspection.marker)), h('p', null, inspection.hostname), inspection.matches.map(item => h('p', { key: item.id }, h('code', null, item.id)))) : null,
+          anchor(t('recoveryGuide'), 'https://github.com/Aero123421/dsh-cf/blob/main/docs/reference.md#不明な書き込みの復旧')) : null,
         state?.hostReview ? h('div', { className: 'notice', role: 'alert' }, h('strong', null, t('hostTitle')),
           h('p', null, t('hostBody')),
           h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: hostOk, disabled: locked, onChange: e => setHostOk(e.target.checked) }), t('hostConfirm')),
@@ -838,7 +996,7 @@ window.__ModuleLoader__.load({
           h('p', { className: 'hint' }, t('publicAddress')),
           h('p', null, h('a', { className: 'url', href: state.publicUrl, target: '_blank', rel: 'noopener noreferrer' }, state.publicUrl)),
           h('p', { className: 'hint' }, t('loginHint')),
-          h('div', { className: 'actions' }, anchor(t('openDsh'), state.publicUrl, true), !remote && ['stopped', 'error'].includes(state.phase) ? button(t('resume'), 'resume') : null, h('button', { type: 'button', onClick: copyUrl }, copied ? t('copied') : t('copy'))),
+          h('div', { className: 'actions' }, !remote && ['idle', 'stopped', 'error'].includes(state.phase) ? button(t('resume'), 'resume', {}, { className: 'primary', disabled: !!state.pendingWrite || !!state.hostReview }) : anchor(t('openDsh'), state.publicUrl, true), h('button', { type: 'button', onClick: copyUrl }, copied ? t('copied') : t('copy'))),
           state.setup.requireWebAuthn !== false ? h('p', null, anchor(t('enroll'), state.enrollmentUrl)) : null,
           ready || state.autoConnect ? h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: !!state.autoConnect, disabled: locked || !!state.hostReview, onChange: e => void run('autoconnect', { enabled: e.target.checked }) }), t('autoConnect')) : null) : null,
         h('details', { className: 'settings', open: !state?.setup }, h('summary', null, t('settings')),
@@ -853,30 +1011,30 @@ window.__ModuleLoader__.load({
           h('div', { className: 'actions' }, h('button', { className: 'primary', type: 'button', disabled: locked || !clientId || !scopes.trim(), onClick: () => void run('oauth/start', { clientId, scopes: scopes.split(/\s+/).filter(Boolean) }, value => { if (value?.authorizationUrl) setLink({ attempt: value.attempt, authorizationUrl: value.authorizationUrl, redirectUri: value.redirectUri, expiresAt: value.expiresAt }); }) }, t('oauthStart')))),
             !state?.authorized ? h('div', { style: { marginTop: 14 } }, field(t('apiToken'), token, setToken, { type: 'password' })) : null,
             !state?.authorized ? h('div', { className: 'actions' }, h('button', { type: 'button', disabled: locked || !token.trim(), onClick: () => { const value = token; setToken(''); void run('authorize', { token: value }); } }, t('apiTokenButton'))) : null,
-            !state?.authorized ? h('p', { className: 'hint' }, t('apiTokenHint')) : null)),
+            !state?.authorized ? h('div', { className: 'hint' }, h('p', null, t('apiTokenHint')), anchor(t('tokenCreate'), 'https://dash.cloudflare.com/profile/api-tokens'), anchor(t('tokenGuide'), 'https://github.com/Aero123421/dsh-cf#2-cloudflareへの接続を許可する')) : null)),
         h('div', { className: 'card' }, h('h3', null, t('cardPublish')),
-          select(t('accountLabel'), form.accountId, chooseAccount, state?.accounts || [], locked || !state?.authorized, t('choose')),
+          select(t('accountLabel'), form.accountId, chooseAccount, state?.accounts?.length ? state.accounts : state?.setup ? [{ id: state.setup.accountId, name: state.setup.accountId }] : [], identityLocked || !state?.authorized, t('choose')),
           h('p', { className: 'hint' }, t('authHint')),
-          state?.setup ? h('p', { className: 'hint' }, t('authSavedHint')) : null,
+          state?.setup ? h('p', { className: 'hint' }, t('authSavedHint'), ' ', t('identityLocked')) : null,
           form.accountId ? h('div', { className: 'actions' }, button(t('loadAccount'), 'account', { accountId: form.accountId }, { disabled: locked || !state?.authorized })) : null,
           form.requireWebAuthn && account?.mfa === 'substitute' ? h('div', { className: 'notice', role: 'status' }, t('mfaSubstitute')) : null,
           form.requireWebAuthn && account?.mfa === 'unknown' ? h('div', { className: 'notice', role: 'status' }, t('mfaUnknown')) : null,
           form.requireWebAuthn && account && account.mfa === 'independent' && account.mfaMissing.length ? h('div', null, h('div', { className: 'notice' }, h('strong', null, t('mfaTitle')), h('p', null, t('mfaBody')), h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: consent, onChange: e => setConsent(e.target.checked) }), t('mfaConsent')), button(t('mfaEnable'), 'mfa/enable', { accountId: form.accountId, revision: account.organizationRevision, approved: true }, { disabled: locked || !consent }))) : null,
           form.requireWebAuthn && account && account.mfa === 'independent' && !account.mfaMissing.length ? h('p', { className: 'hint' }, t('mfaReady')) : null,
-          account ? h('div', { className: 'grid', style: { marginTop: 14 } }, select(t('zoneLabel'), form.zoneId, change('zoneId'), account.zones, locked, t('choose')), select(t('idpLabel'), form.idpId, change('idpId'), account.idps, locked, t('choose'))) : null,
-          h('div', { className: 'grid', style: { marginTop: 14 } }, field(t('hostname'), form.hostname, change('hostname'), { placeholder: 'mac.example.com', disabled: locked }), field(t('ownerEmail'), form.ownerEmail, change('ownerEmail'), { type: 'email', placeholder: 'you@example.com', disabled: locked })),
+          account ? h('div', { className: 'grid', style: { marginTop: 14 } }, select(t('zoneLabel'), form.zoneId, change('zoneId'), account.zones, identityLocked, t('choose')), select(t('idpLabel'), form.idpId, change('idpId'), account.idps, identityLocked, t('choose'))) : null,
+          h('div', { className: 'grid', style: { marginTop: 14 } }, field(t('hostname'), form.hostname, change('hostname'), { placeholder: 'mac.example.com', disabled: identityLocked }), field(t('ownerEmail'), form.ownerEmail, change('ownerEmail'), { type: 'email', placeholder: 'you@example.com', disabled: identityLocked })),
           h('p', { className: 'hint' }, t('sameUrl')),
           h('details', null, h('summary', null, t('advanced')),
           h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: form.requireWebAuthn, disabled: locked, onChange: e => change('requireWebAuthn')(e.target.checked) }), t('requireWebAuthn')),
-            field(t('cloudflaredPath'), form.cloudflaredPath, change('cloudflaredPath')), h('p', { className: 'hint' }, t('cloudflaredHint'))),
+            field(t('cloudflaredPath'), form.cloudflaredPath, change('cloudflaredPath'), { disabled: locked }), h('p', { className: 'hint' }, t('cloudflaredHint'))),
           h('label', { className: 'check' }, h('input', { type: 'checkbox', checked: form.allowDownload, disabled: locked, onChange: e => change('allowDownload')(e.target.checked) }), t('allowDownload')),
           h('div', { className: 'actions' }, h('button', { type: 'button', className: 'primary', disabled: blocker !== null, 'aria-describedby': blocker ? 'dcf-connect-reason' : undefined, onClick: () => void run('start', form) }, t(state?.setup ? 'saveConnect' : 'connect')), state?.setup ? button(t('resume'), 'resume', {}, { disabled: !!state?.hostReview }) : null, state?.setup && state?.authorized ? button(t('refreshToken'), 'token/refresh', {}, { disabled: locked || !!state?.hostReview }) : null),
           blocker ? h('p', { className: 'reason', id: 'dcf-connect-reason', role: 'status' }, t(BLOCKER_KEY[blocker])) : null,
-          state?.download ? h('div', { role: 'status' }, h('p', { className: 'hint' }, 'cloudflared: ', state.download.phase), state.download.total > 0 ? h('progress', { max: state.download.total, value: state.download.received || 0, 'aria-label': t('downloadLabel') }) : null) : null),
+          state?.download ? h('div', { role: 'status' }, h('p', { className: 'hint' }, 'cloudflared: ', t('download_' + state.download.phase)), state.download.total > 0 ? h('progress', { max: state.download.total, value: state.download.received || 0, 'aria-label': t('downloadLabel') }) : null) : null),
         h('div', { className: 'actions' }, h('button', { type: 'button', disabled: remote || stopping, onClick: () => void control(pending || state?.busy ? 'cancel' : 'stop') }, stopping ? t('stopping') : pending || state?.busy ? t('cancel') : t('stop'))),
-        state?.setup ? h('details', null, h('summary', null, t('deleteSummary')), h('p', { className: 'hint' }, t('deleteHint')), field(t('deleteField'), deleteName, setDeleteName), h('div', { className: 'actions' }, button(t('deleteButton'), 'remove', { confirmHostname: deleteName }, { disabled: locked || !state.authorized || deleteName !== state.setup.hostname }))) : null,
+        state?.setup ? h('details', null, h('summary', null, t('deleteSummary')), h('p', { className: 'hint' }, t('deleteHint')), field(t('deleteField'), deleteName, setDeleteName), h('div', { className: 'actions' }, button(t('deleteButton'), 'remove', { confirmHostname: deleteName }, { disabled: locked || !state.authorized || deleteName !== state.setup.hostname, after: () => { seeded.current = false; setForm(f => ({ ...f, accountId: '', zoneId: '', idpId: '', hostname: '', ownerEmail: '' })); } }))) : null,
         ),
-        h('details', null, h('summary', null, t('diagnostics')), h('p', null, h('code', null, `Instance: ${state?.instanceId || '—'}`)), state?.binary ? h('p', null, h('code', null, `${state.binary.path} (${state.binary.version})`)) : null, state?.lastVerifiedAt ? h('p', { className: 'hint' }, t('lastVerified', { time: new Date(state.lastVerifiedAt).toLocaleString() })) : null, h('ul', null, [['unauthenticatedRejected', 'evidenceRejected'], ['owner', 'evidenceOwner'], ['http', 'evidenceHttp'], ['api', 'evidenceApi'], ['websocket', 'evidenceWebsocket']].map(([key, label]) => h('li', { key }, `${state?.evidence?.[key] ? '✓' : '○'} ${t(label)}`))), state?.steps?.map(s => h('p', { className: 'hint', key: s.id }, `${t(STEP_KEY[s.id] || 'diagnostics')}: ${s.message || t(STATE_KEY[s.status] || 'stateIdle')}`))),
+        h('details', null, h('summary', null, t('diagnostics')), h('p', null, h('code', null, `Instance: ${state?.instanceId || '—'}`)), state?.binary ? h('p', null, h('code', null, `${state.binary.path} (${state.binary.version})`)) : null, state?.lastVerifiedAt ? h('p', { className: 'hint' }, t('lastVerified', { time: new Date(state.lastVerifiedAt).toLocaleString() })) : null, h('ul', null, [['unauthenticatedRejected', 'evidenceRejected'], ['owner', 'evidenceOwner'], ['http', 'evidenceHttp'], ['api', 'evidenceApi'], ['websocket', 'evidenceWebsocket']].map(([key, label]) => h('li', { key }, `${state?.evidence?.[key] ? '✓' : '○'} ${t(label)}`))), state?.steps?.map(s => h('p', { className: 'hint', key: s.id }, `${t(STEP_KEY[s.id] || 'diagnostics')}: ${t(STATE_KEY[s.status] || 'stateIdle')}`))),
         h('details', null, h('summary', null, t('updateTitle')), h(UpdatePanel, { updates, remote: remote || !/^(?:localhost|\[?::1\]?|127\.\d+\.\d+\.\d+)$/.test(window.location.hostname), version: state?.version, cloudBusy: locked, authorized: state?.authorized, t })),
         h('details', null, h('summary', null, t('help')), h('p', { className: 'hint' }, t('helpBody')))
       );
@@ -889,13 +1047,13 @@ window.__ModuleLoader__.load({
       let locale = null;
       try { locale = ctx.get('locale'); } catch { locale = null; }
       if (locale?.register) {
-        try { locale.register('dsh-cf', { zh: COPY.zh, en: COPY.en }); }
+        try { ctx.effect(() => locale.register('dsh-cf', { zh: COPY.zh, en: COPY.en }), 'dsh-cf: base dictionaries'); }
         catch (error) { if (!duplicateLocale(error)) throw error; }
         if (typeof locale.addLanguage === 'function') {
-          try { locale.addLanguage({ id: 'ja', label: '日本語', fallback: 'en' }); }
+          try { ctx.effect(() => locale.addLanguage({ id: 'ja', label: '日本語', fallback: 'en' }), 'dsh-cf: Japanese language'); }
           catch (error) { if (!duplicateLocale(error)) throw error; }
         }
-        try { locale.register('dsh-cf', 'ja', COPY.ja); }
+        try { ctx.effect(() => locale.register('dsh-cf', 'ja', COPY.ja), 'dsh-cf: Japanese dictionary'); }
         catch (error) { if (!duplicateLocale(error)) throw error; }
       }
       const connection = ctx.get('connection');
@@ -908,6 +1066,6 @@ window.__ModuleLoader__.load({
       const label = () => { try { return locale.bind('dsh-cf')('nav'); } catch { return 'Cloudflare'; } };
       ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'dsh-cf', order: 20, label, locale: 'dsh-cf' }, SettingsPanel));
     }
-    return { apply, inject: ['slots', 'connection', 'locale'], UpdateController, PanelSession, connectBlockers, translate, COPY };
+    return { apply, inject: ['slots', 'connection', 'locale'], UpdateController, PanelSession, SnapshotCursor, errorMessage, connectBlockers, translate, COPY };
   },
 });

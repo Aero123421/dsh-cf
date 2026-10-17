@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CfError, demand, safeError, pause, timeout } from './common.js';
 import { OAuth } from './oauth.js';
-import { Cloudflare, provision, removeOwned, refreshTunnelToken } from './cloudflare.js';
+import { Cloudflare, provision, removeOwned, refreshTunnelToken, assertSetupChange, inspectPending } from './cloudflare.js';
 import { ensureBinary, Connector } from './connector.js';
 import { accessVerifier } from './access.js';
 import { Gate, DIAGNOSTIC_PATH } from './gate.js';
@@ -13,7 +13,7 @@ export class Controller {
   constructor({ store, adapter, config = {}, fetchImpl = fetch, dependencies = {} }) {
     this.store = store; this.adapter = adapter; this.config = config; this.fetch = fetchImpl;
     this.deps = { ensureBinary, Connector, accessVerifier, Gate, provision, removeOwned, refreshTunnelToken, ...dependencies };
-    this.seq = 0; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
+    this.generation = randomUUID(); this.seq = 0; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
     this.phase = 'idle'; this.error = null; this.operation = null; this.gate = null; this.connector = null;
     this.token = null; this.tokenUntil = 0; this.grantType = null; this.accountList = []; this.accountDetails = null;
     this.authGeneration = 0; this.requests = new Set(); this.stopping = null; this.closingRuntime = null; this.forgetting = null; this.evidence = {}; this.binary = null; this.disposed = false;
@@ -106,7 +106,7 @@ export class Controller {
   snapshot() {
     const s = this.store.state;
     return {
-      sequence: this.seq, operationId: this.operation?.id ?? null, busy: !!(this.operation || this.stopping || this.forgetting || this.requests.size), phase: this.phase,
+      generation: this.generation, sequence: this.seq, operationId: this.operation?.id ?? null, busy: !!(this.operation || this.stopping || this.forgetting || this.requests.size), phase: this.phase,
       steps: this.steps.map(s => ({ ...s })), error: this.error,
       instanceId: s.instanceId, setup: s.setup, autoConnect: s.autoConnect, gatePort: s.gatePort,
       resources: { ...s.owned }, pendingWrite: s.pending ? { kind: s.pending.kind, at: s.pending.at } : null,
@@ -136,6 +136,7 @@ export class Controller {
   async handle(endpoint, payload = {}) {
     demand(payload && typeof payload === 'object' && !Array.isArray(payload), 'PAYLOAD', 'Expected an object payload.');
     if (endpoint === 'status') return this.snapshot();
+    demand(payload.generation === undefined || payload.generation === this.generation, 'STALE_HOST', 'DSH restarted. Read its current status before changing settings.');
     demand(!this.disposed, 'STOPPED', 'Plugin is stopping.');
     if (endpoint === 'stop' || endpoint === 'cancel') { await this.stop(); return this.snapshot(); }
     demand(!this.operation && !this.stopping && !this.forgetting, 'BUSY', 'Another operation is still in progress.');
@@ -158,6 +159,11 @@ export class Controller {
       case 'oauth/attempt': return this.oauthAttempt();
       case 'token/refresh': this.hostConfirmed(); return this.launch(signal => this.refreshAndReconnect(signal));
       case 'account': return this.account(payload);
+      case 'pending/inspect': {
+        demand(!this.requests.size, 'BUSY', 'Another management request is still in progress.');
+        const cf = this.cf();
+        return this.request(signal => inspectPending(cf, this.store, signal));
+      }
       case 'mfa/enable':
         demand(payload.approved === true, 'CONSENT', 'Review and explicitly approve the additive organization MFA change.');
         return this.account(payload, true);
@@ -202,16 +208,29 @@ export class Controller {
     return { operationId: operation.id };
   }
   async start(input, signal, resume) {
-    await this.closeRuntime(); signal.throwIfAborted(); this.evidence = {}; this.reachability = null; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
-    this.phase = 'configuring'; this.step('environment', 'working', 'Checking DSH and cloudflared');
-    this.hostConfirmed();
-    await this.dshFacts(signal);
     const s = this.store.state;
-    const setup = resume ? s.setup : await this.cf().validateSetup(input, signal);
-    demand(setup, 'SETUP', 'Complete initial setup first.');
-    if (resume) demand(s.lastConfigurationCheck && s.owned.audience && s.owned.dnsId && !s.pending && await this.store.hasToken(), 'SETUP', 'Initial provisioning did not finish. Authorize and retry setup.');
-    const selected = input.cloudflaredPath || this.config.cloudflaredPath || s.selectedBinary || '';
-    this.binary = await this.deps.ensureBinary({ dir: this.store.dir, selected, allowDownload: !resume && input.allowDownload === true, signal, fetchImpl: this.fetch, onProgress: value => { this.download = value; this.changed(); } });
+    let setup, selected, binary;
+    try {
+      this.hostConfirmed();
+      demand(!s.pending, 'WRITE_UNKNOWN', 'Inspect the unknown write before reconnecting.');
+      setup = resume ? s.setup : await this.cf().validateSetup(input, signal);
+      demand(setup, 'SETUP', 'Complete initial setup first.');
+      assertSetupChange(s.setup, setup, s.owned);
+      if (resume) demand(s.lastConfigurationCheck && s.owned.audience && s.owned.dnsId && await this.store.hasToken(), 'SETUP', 'Initial provisioning did not finish. Authorize and retry setup.');
+      await this.dshFacts(signal);
+      selected = input.cloudflaredPath || this.config.cloudflaredPath || s.selectedBinary || '';
+      binary = await this.deps.ensureBinary({ dir: this.store.dir, selected, allowDownload: !resume && input.allowDownload === true, signal, fetchImpl: this.fetch, onProgress: value => { this.download = value; this.changed(); } });
+      signal.throwIfAborted();
+    } catch (error) {
+      this.download = null;
+      if (this.gate && this.connector && !signal.aborted) {
+        const failure = error instanceof CfError ? new CfError(error.code, error.message, error.details) : new CfError('INTERNAL', 'The settings could not be checked. The running connection was retained.');
+        failure.preserveRuntime = true; throw failure;
+      }
+      throw error;
+    }
+    await this.closeRuntime(); signal.throwIfAborted(); this.evidence = {}; this.reachability = null; this.steps = STEP_IDS.map(id => ({ id, status: 'idle', message: '' }));
+    this.binary = binary; this.phase = 'configuring'; this.step('environment', 'working', 'Checking DSH and cloudflared');
     this.download = null; s.selectedBinary = selected; await this.store.save();
     signal.throwIfAborted(); this.step('environment', 'done', `${this.binary.source}: ${this.binary.version}`);
     this.step('authorization', 'done', resume ? 'Saved connector token; management grant not required' : 'Selected Cloudflare resources verified');
