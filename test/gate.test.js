@@ -27,6 +27,19 @@ function websocket(port, path = '/api/stream') {
     req.end();
   });
 }
+test('closing one browser keeps WebSocket evidence while another upgraded socket remains active', async t => {
+  const faults = [], f = await fixture(t, { onFault: value => faults.push(value) });
+  await f.activate();
+  const a = await websocket(f.gate.port), b = await websocket(f.gate.port);
+  t.after(() => { a.socket.destroy(); b.socket.destroy(); });
+  assert.equal(f.gate.websockets.size, 2);
+  a.socket.destroy(); await until(() => f.gate.websockets.size === 1);
+  assert.equal(faults.length, 0);
+  const data = once(b.socket, 'data'); b.socket.write('still-alive');
+  assert.equal((await data)[0].toString(), 'still-alive');
+  b.socket.destroy(); await until(() => faults.some(value => value.status === 'websocket-closed'));
+  assert.equal(f.gate.websockets.size, 0);
+});
 async function halfOpenUpgrade(t, port, upgrade = 'websocket') {
   const socket = connect({ host: '127.0.0.1', port, allowHalfOpen: true });
   t.after(() => socket.destroy());

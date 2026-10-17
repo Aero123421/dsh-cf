@@ -7,7 +7,11 @@ import { dshPeerSatisfies } from '../src/updates.js';
 import manifest from '../package.json' with { type: 'json' };
 
 const peer = manifest.peerDependencies['@deepseek-ai/dsh'];
-const installs = ['0.2.1-alpha.2', '0.2.1-alpha.3'];
+const registry = spawnSync('npm', ['view', '@deepseek-ai/dsh', 'dist-tags', '--json'], { encoding: 'utf8', timeout: 30_000 });
+if (registry.status !== 0) commandFailure(registry, 'DSH channel discovery');
+const tags = JSON.parse(registry.stdout);
+const installs = [...new Set(['0.2.1-alpha.2', '0.2.1-alpha.3', tags.alpha, tags.next])];
+for (const runtime of installs) if (!dshPeerSatisfies(runtime, peer)) fail(`current DSH alpha/next ${runtime} is outside ${peer}; review the new runtime before extending support`);
 const refused = ['*', 'x', '>=0', 'workspace:*', 'workspace:^', 'workspace:~', '>=0.2.1-alpha.2', '<99', '^0', '<=9.9.9', '<0.3.0-0', '>=0.2.1-alpha.2 <0.3.0', '0.2.x', '0.2.1-alpha.2 - 0.3.0'];
 const compared = [peer, '^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.1-alpha.2', '~0.2.1', '', ' ', 'not a range'];
 

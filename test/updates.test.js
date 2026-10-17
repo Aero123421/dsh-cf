@@ -5,11 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
+import semver from 'semver';
 import { Updates, compareVersions, checkedCandidate, supportsSource, dshPeerSatisfies, releaseSpecs, VERSION } from '../src/updates.js';
 import manifest from '../package.json' with { type: 'json' };
 const PROFILE_KEY = 'a'.repeat(64);
 const RUNTIME = '0.2.1-alpha.2', REPO = 'Aero123421/dsh-cf';
-const NEXT = '0.1.0-alpha.7';
+const NEXT = semver.inc(VERSION, 'prepatch', 'test'), AHEAD = semver.inc(NEXT, 'preminor', 'test');
 function release(version, id = 1) { return { id, tag_name: 'v'+version, draft: false, prerelease: version.includes('-'), html_url: `https://github.com/${REPO}/releases/tag/v${version}`, body: 'Release notes', assets: [] }; }
 const DSH_RANGE = '>=0.2.1-alpha.2 <0.3.0-0';
 function pkg(version = NEXT, peer = RUNTIME) {
@@ -18,6 +19,18 @@ function pkg(version = NEXT, peer = RUNTIME) {
 function github(releases = [release(NEXT)], packageValue) {
   return async url => url.includes('/releases?') ? Response.json(releases) : Response.json(packageValue || pkg(url.split('/').at(-2).slice(1)));
 }
+test('engines.dsh takes precedence over peers and engines-only releases remain updateable', async () => {
+  const candidate = { ...pkg(), engines: { dsh: DSH_RANGE } };
+  delete candidate.peerDependencies;
+  assert.equal((await checkedCandidate('prerelease', RUNTIME, github(undefined, candidate))).status, 'available');
+  candidate.peerDependencies = { '@deepseek-ai/dsh': '9.0.0' };
+  assert.equal((await checkedCandidate('prerelease', RUNTIME, github(undefined, candidate))).status, 'available');
+  candidate.peerDependencies = null;
+  assert.equal((await checkedCandidate('prerelease', RUNTIME, github(undefined, candidate))).status, 'available');
+  candidate.peerDependencies = { '@deepseek-ai/dsh': DSH_RANGE };
+  candidate.engines.dsh = '>=0.2.2 <0.3.0-0'; candidate.peerDependencies['@deepseek-ai/dsh'] = DSH_RANGE;
+  await assert.rejects(checkedCandidate('prerelease', RUNTIME, github(undefined, candidate)), { code: 'UPDATE_COMPATIBILITY' });
+});
 async function fixture(t, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cf-updates-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const bundle = { name: 'dsh-cf', installed: true, enabled: false, version: VERSION, source: `github:${REPO}#v${VERSION}`, ...options.bundle };
@@ -82,6 +95,29 @@ test('Disabled bundle, explicit GitHub pin and outcome survive restart without t
   assert.equal((await restarted.status(id)).status, 'confirmed');
   const record = await readFile(join(dir, '.dsh-cf-updates', `${id}.json`), 'utf8'); assert(!record.includes('token')); assert(!record.includes('cloudflared'));
 });
+test('polling an unchanged completed update does not rewrite its receipt', async t => {
+  const { updates } = await fixture(t), checked = await updates.check('prerelease');
+  await updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey);
+  let writes = 0;
+  const save = updates.save.bind(updates); updates.save = (...args) => { writes++; return save(...args); };
+  await updates.status(); await updates.status(); await updates.status();
+  assert.equal(writes, 0);
+});
+test('a recovered install receipt is durable before a failed inventory read', async t => {
+  const { updates, bundle, manager, dir } = await fixture(t);
+  const operation = { id: randomUUID(), version: NEXT, channel: 'prerelease', phase: 'unknown' };
+  updates.operation = operation; await updates.save(true);
+  bundle.version = NEXT;
+  manager.waitForInstall = async () => ({ application: 'restart-required', stage: 'install', bundle: 'dsh-cf', version: NEXT });
+  let reads = 0;
+  manager.listBundles = async () => { if (++reads === 2) throw new Error('inventory unavailable'); return [bundle]; };
+  assert.equal((await updates.status()).status, 'unavailable');
+  const receipt = JSON.parse(await readFile(join(dir, '.dsh-cf-updates', `${operation.id}.json`), 'utf8'));
+  assert.equal(receipt.result.version, NEXT);
+  manager.listBundles = async () => [bundle]; manager.waitForInstall = async () => { throw new Error('old manager history is gone'); };
+  const restarted = new Updates({ manager: () => manager, profileDir: dir, runtime: RUNTIME });
+  assert.equal((await restarted.status(operation.id)).status, 'restart-required');
+});
 test('Failed, cancelled, overridden, applied-with-old-runtime and wrong manifest versions stay distinct', async t => {
   for (const application of ['failed', 'cancelled', 'overridden', 'applied']) {
     const { updates } = await fixture(t, { result: { application, ...(application === 'cancelled' ? { packageResult: { exitCode: 130 } } : {}) } }), checked = await updates.check('prerelease');
@@ -105,7 +141,7 @@ test('Pending result is protected across Clients and newer candidates; null reco
   const { updates, manager, dir } = await fixture(t, { fetcher, manager: { installBundle: async () => { installs++; throw Error('lost'); } } });
   const checked = await updates.check('prerelease'), id = randomUUID();
   assert.equal((await updates.install(checked.candidate.id, id, 'prerelease', updates.profileKey)).status, 'unknown');
-  version = '0.1.0-alpha.7';
+  version = AHEAD;
   const next = new Updates({ manager: () => manager, profileDir: dir, runtime: RUNTIME, fetcher });
   assert.equal((await next.status(id)).status, 'unknown');
   assert.equal((await next.install(checked.candidate.id, randomUUID(), 'prerelease', next.profileKey)).status, 'unknown');
@@ -119,7 +155,7 @@ test('Different pending operation IDs are refused distinctly and no downgrade is
   const checked = await updates.check('prerelease'), first = updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey); await started;
   await assert.rejects(updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey), { code: 'UPDATE_BUSY' });
   releaseInstall({ application: 'failed', stage: 'install' }); await first;
-  const ahead = await fixture(t, { bundle: { version: '0.1.0-alpha.9' } });
+  const ahead = await fixture(t, { bundle: { version: AHEAD } });
   assert.equal((await ahead.updates.check('prerelease', updates.profileKey)).status, 'restart-required');
   await ahead.updates.install(`${1}:v${NEXT}`, randomUUID(), 'prerelease', ahead.updates.profileKey); assert.equal(ahead.calls.length, 0);
 });
@@ -137,7 +173,7 @@ test('Disposal or newly installed version during final await prevents manager in
     const final = new Promise(resolve => { announce = resolve; });
     const { updates, calls, bundle } = await fixture(t, { manager: { listBundles: async () => { count++; if (count === 3) { announce(); await new Promise(resolve => { releaseLookup = resolve; }); } return [bundle]; } } });
     const checked = await updates.check('prerelease'), pending = updates.install(checked.candidate.id, randomUUID(), 'prerelease', updates.profileKey); await final;
-    if (disposed) updates.dispose(); else bundle.version = '0.1.0-alpha.9';
+    if (disposed) updates.dispose(); else bundle.version = AHEAD;
     releaseLookup(); await pending; assert.equal(calls.length, 0);
   }
 });
@@ -145,7 +181,7 @@ test('Old Host settlement cannot replace a newer operation pointer', async t => 
   const { updates, dir } = await fixture(t), first = randomUUID(), second = randomUUID();
   updates.operation = { id: first, version: NEXT, channel: 'prerelease', phase: 'installing' }; await updates.save(true);
   const replacement = new Updates({ manager: updates.manager, profileDir: dir, runtime: RUNTIME });
-  replacement.operation = { id: second, version: '0.1.0-alpha.7', channel: 'prerelease', phase: 'installing' }; await replacement.save(true);
+  replacement.operation = { id: second, version: NEXT, channel: 'prerelease', phase: 'installing' }; await replacement.save(true);
   updates.operation.result = { application: 'failed', stage: 'install' }; updates.operation.phase = 'failed'; await updates.save();
   assert.equal(JSON.parse(await readFile(join(dir, '.dsh-cf-updates/latest.json'), 'utf8')).id, second);
   assert.equal((await replacement.status(second)).operation, second);
@@ -254,7 +290,7 @@ test('already-installed reconciles when the release is on disk and refuses a new
   assert.equal(installs, 1);
   const ahead = await fixture(t, { manager: {
     removeBundle: async () => { removed.push('remove'); },
-    installBundle: async (spec) => { ahead.calls.push(spec); ahead.bundle.version = '0.1.0-alpha.9'; return { application: 'failed', stage: 'install', error: { code: 'already-installed' } }; },
+    installBundle: async (spec) => { ahead.calls.push(spec); ahead.bundle.version = AHEAD; return { application: 'failed', stage: 'install', error: { code: 'already-installed' } }; },
   } });
   checked = await ahead.updates.check('prerelease');
   assert.equal((await ahead.updates.install(checked.candidate.id, randomUUID(), 'prerelease', ahead.updates.profileKey)).reason, 'UPDATE_CANDIDATE');

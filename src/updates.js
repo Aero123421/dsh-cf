@@ -119,8 +119,9 @@ export async function checkedCandidate(channel, runtime, fetcher = fetch, signal
   if (installedVersion && compareVersions(candidate.version, installedVersion) <= 0) return { candidate: null, status: 'current' };
   const pkg = object(await json(`https://raw.githubusercontent.com/${REPOSITORY}/${candidate.tag}/package.json`, fetcher, signal, 64 * 1024));
   demand(pkg.name === 'dsh-cf' && pkg.version === candidate.version && object(object(pkg.dsh).bundle).patch === './cordis.patch.yml' && pkg.exports?.['.'] === './src/index.js' && pkg.exports?.['./client'] === './src/client.js', 'UPDATE_METADATA', '対象プラグインと版を確認できません。');
-  const peers = object(pkg.peerDependencies), ranges = Object.entries(peers).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'));
-  demand(runtime && ranges.length && typeof peers['@deepseek-ai/dsh'] === 'string', 'UPDATE_COMPATIBILITY', '対応DSHの版を確認できません。手動更新先を確認してください。');
+  const engines = pkg.engines === undefined ? {} : object(pkg.engines);
+  const ranges = Object.hasOwn(engines, 'dsh') ? [['engines.dsh', engines.dsh]] : Object.entries(pkg.peerDependencies === undefined ? {} : object(pkg.peerDependencies)).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'));
+  demand(runtime && ranges.length, 'UPDATE_COMPATIBILITY', '対応DSHの版を確認できません。手動更新先を確認してください。');
   // The whole range must sit inside >=0.2.1-alpha.2 <0.3.0-0. DSH boot still accepts wider ranges.
   for (const [, range] of ranges) demand(typeof range === 'string' && dshPeerSatisfies(runtime, range), 'UPDATE_COMPATIBILITY', 'このリリースは使用中のDSHに対応していません。');
   return { candidate: { ...candidate, runtime }, status: 'available' };
@@ -198,9 +199,15 @@ export class Updates {
       const operation = this.operation;
       const result = operation.result ?? await manager.waitForInstall(operation.id);
       if (!result) { operation.phase = 'unknown'; const view = { ...this.view, status: 'unknown', operation: operation.id }; if (this.operation?.id === operation.id && !this.activeId) this.view = view; return view; }
-      operation.result = safeResult(result); await this.save(false, operation);
+      const previousResult = JSON.stringify(operation.result);
+      operation.result = safeResult(result);
+      // Keep a newly recovered receipt durable even if the following inventory read fails.
+      if (JSON.stringify(operation.result) !== previousResult) await this.save(false, operation);
+      const previousPhase = operation.phase;
       const installed = (await manager.listBundles()).find(item => item.name === 'dsh-cf');
-      const view = this.result(result, installed, operation); await this.save(false, operation); return view;
+      const view = this.result(result, installed, operation);
+      if (operation.phase !== previousPhase) await this.save(false, operation);
+      return view;
     } catch (error) { return this.fail(error, 'unavailable'); }
   }
   check(channel) {

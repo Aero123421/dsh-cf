@@ -171,15 +171,43 @@ function acceptedConnectorToken(raw, accountId, tunnelId) {
   return raw;
 }
 /** Durable checkpoints record our IDs; a lost POST result is never silently retried. */
+export function assertSetupChange(previous, next, owned) {
+  if (!previous) return;
+  const { requireWebAuthn: _previousMode, ...before } = previous;
+  const { requireWebAuthn: _nextMode, ...after } = next;
+  demand(exact(before, after), 'SETUP_CHANGED', 'Remove this instance’s existing public configuration before changing its account, hostname, owner, or IdP.');
+  if (requiresWebAuthn(previous) !== requiresWebAuthn(next)) demand(owned.appId, 'SETUP_CHANGED', 'Finish or remove the existing setup before changing its authentication mode.');
+}
+
+/** Read-only reconciliation aid. Never adopt, delete, clear a checkpoint, or repeat a write. */
+export async function inspectPending(cf, store, signal) {
+  const { pending, setup, owned, instanceId } = store.state;
+  demand(pending && setup, 'WRITE_UNKNOWN', 'There is no saved write to inspect.');
+  const accountId = cfId(setup.accountId), zoneId = cfId(setup.zoneId);
+  const marker = `dsh-cf-${instanceId}`, host = hostname(setup.hostname);
+  demand(pending.marker === marker, 'WRITE_UNKNOWN', 'The saved write marker does not match this instance.');
+  let resources, expectedId;
+  if (['access', 'authentication', 'session'].includes(pending.kind)) {
+    resources = (await cf.list(`/accounts/${id(accountId)}/access/apps`, signal)).filter(app => app.name === marker && app.domain === host);
+    expectedId = owned.appId;
+  } else if (pending.kind === 'tunnel') {
+    resources = (await cf.list(`/accounts/${id(accountId)}/cfd_tunnel`, signal)).filter(tunnel => tunnel.name === marker && !tunnel.deleted_at);
+    expectedId = owned.tunnelId;
+  } else if (pending.kind === 'dns') {
+    resources = (await cf.list(`/zones/${id(zoneId)}/dns_records?name=${id(host)}`, signal)).filter(record => record.name === host && record.comment === marker && record.type === 'CNAME' && record.content === `${owned.tunnelId}.cfargotunnel.com`);
+    expectedId = owned.dnsId;
+  } else throw new CfError('WRITE_UNKNOWN', 'This write needs manual inspection using the recovery guide.');
+  signal?.throwIfAborted();
+  const matches = resources.filter(item => typeof item.id === 'string').map(item => ({ id: item.id, recorded: item.id === expectedId }));
+  return { kind: pending.kind, at: pending.at, marker, hostname: host, status: matches.length === 0 ? 'not-found' : matches.length === 1 && (!expectedId || matches[0].recorded) ? 'found' : 'ambiguous', matches: matches.slice(0, 10) };
+}
+
 export async function provision(cf, store, setup, gatePort, signal, progress = () => {}) {
   const s = store.state; const owned = s.owned; const marker = `dsh-cf-${s.instanceId}`;
   demand(!s.pending, 'WRITE_UNKNOWN', 'A previous Cloudflare write has an unknown result. Inspect the pending record and Cloudflare resources before retrying; no duplicate was created.');
   if (s.setup) {
-    const { requireWebAuthn: previousMode, ...previous } = s.setup;
-    const { requireWebAuthn: nextMode, ...next } = setup;
-    demand(exact(previous, next), 'SETUP_CHANGED', 'Remove this instance’s existing public configuration before changing its account, hostname, owner, or IdP.');
+    assertSetupChange(s.setup, setup, owned);
     const modeChanged = requiresWebAuthn(s.setup) !== requiresWebAuthn(setup);
-    if (modeChanged) demand(owned.appId, 'SETUP_CHANGED', 'Finish or remove the existing setup before changing its authentication mode.');
     if (owned.appId) {
       const app = await validateAccess(cf, s.setup, owned, s.instanceId, signal);
       if (modeChanged || app.session_duration !== ACCESS_SESSION_DURATION) {

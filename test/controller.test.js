@@ -129,6 +129,42 @@ test('resource deletion requires exact typed hostname confirmation', async t => 
   await assert.rejects(f.controller.handle('remove', { confirmHostname: 'other.example.com' }), { code: 'CONFIRM_DELETE' });
 });
 
+test('a refused identity edit preserves the running connection, checks and resume eligibility', async t => {
+  const f = await fixture(t);
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  for (const kind of ['owner', 'http', 'api', 'websocket']) f.gate.onEvidence(kind);
+  const gate = f.gate, connector = f.connector, checked = f.store.state.lastConfigurationCheck;
+  for (const patch of [{ hostname: 'other.example.com' }, { ownerEmail: 'other@example.com' }, { idpId: 'other-provider' }]) {
+    await f.controller.handle('start', { ...SETUP, ...patch }); await f.controller.operation.promise;
+    assert.equal(f.controller.phase, 'ready');
+    assert.equal(f.controller.gate, gate); assert.equal(f.controller.connector, connector);
+    assert.equal(gate.closed, undefined); assert.equal(connector.stopped, undefined);
+    assert.equal(f.store.state.lastConfigurationCheck, checked);
+    assert.deepEqual(f.store.state.setup, SETUP);
+  }
+  await f.controller.handle('stop');
+  await f.controller.handle('resume'); await f.controller.operation.promise;
+  assert.equal(f.controller.phase, 'waiting-browser');
+});
+test('binary preflight failure does not tear down a working publication', async t => {
+  const f = await fixture(t);
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  const gate = f.gate;
+  f.controller.deps.ensureBinary = async () => { throw new CfError('BINARY_OLD', 'unsupported'); };
+  await f.controller.handle('start', SETUP); await f.controller.operation.promise;
+  assert.equal(f.controller.gate, gate); assert.equal(gate.closed, undefined);
+  assert.equal(f.controller.error.code, 'BINARY_OLD'); assert(f.store.state.lastConfigurationCheck);
+});
+test('Host generations distinguish a fresh sequence from the prior controller', async t => {
+  const a = await fixture(t), b = await fixture(t);
+  assert.notEqual(a.controller.snapshot().generation, b.controller.snapshot().generation);
+  const generation = a.controller.snapshot().generation;
+  await a.controller.handle('stop');
+  assert.equal(a.controller.snapshot().generation, generation);
+  await assert.rejects(b.controller.handle('stop', { generation }), { code: 'STALE_HOST' });
+  assert.equal(b.controller.phase, 'idle');
+});
+
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const oauthPayload = { clientId: 'test-public-client', scopes: ['test.scope'] };

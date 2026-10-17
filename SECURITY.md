@@ -85,3 +85,14 @@ Do not publish live tokens, callback URLs, cookies, private files, or exploitabl
 更新確認・導入・結果照合はDSHの認証に加え、元のloopback接続・Host・Originを確認し、転送元headerのある要求を拒否します。公開gateは従来どおり`/dsh-cf/status`だけを読み取り用として許可し、更新操作を転送しません。
 
 候補は固定GitHub repositoryの明示したリリースタグだけです。画面から任意URLやshell文字列を受け取らず、build scriptを自動承認しません。更新記録には操作ID・版・結果だけを保存し、Cloudflare tokenやDSHの認証情報を含めません。
+
+
+## v0.1.0-alpha.7 lifecycle and recovery
+
+Status carries a random, process-local controller generation as well as its sequence. Client reconciliation retires prior generations, drops their delayed replies, and clears transient authorization inputs when a new Host generation appears. These identifiers grant no authority.
+
+The management-only `pending/inspect` action uses a fresh in-memory management grant and GET requests to list exact instance-marker/hostname matches. It returns only resource IDs and a bounded reconciliation summary. The saved API path is never used as a request destination. This action never repeats a write, changes resources, adopts an ID, or clears a checkpoint. Empty results do not establish that a write failed. Public Tunnel requests cannot invoke it.
+
+Before replacing a working publication, input validation, identity consistency, DSH readiness and binary checks complete first. A refusal in that phase leaves the running connection and prior configuration checkpoint intact; errors after replacement begins still stop the new publication. Multiple authenticated WebSockets are counted independently; closing one browser does not clear another browser’s active connection evidence.
+
+On Linux x64 / Node.js 24.19.0, packed v0.1.0-alpha.7 was tested on published DSH alpha.2, alpha.5 and rc.2, including official configEditor persistence/reload, normal cookie exchange, real HTTP/RPC/WS forwarding, and rejection of missing/wrong-owner local-RSA JWTs and public management requests. The new recovery inspection was tested with API fixtures. No additional live Cloudflare account, IdP, macOS/Windows, Electron, or Safari/iPadOS validation is claimed.

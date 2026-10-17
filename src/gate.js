@@ -63,7 +63,7 @@ export class Gate {
   constructor({ host, instanceId, adapter, verify, onEvidence = () => {}, onFault = () => {}, maximumBodyBytes = 100 * 1024 * 1024, maximumStreamMs = 15 * 60_000, upstreamHeadersMs = 100_000 }) {
     this.host = host; this.instanceId = instanceId; this.adapter = adapter; this.verify = verify; this.onEvidence = onEvidence; this.onFault = onFault;
     this.maximumBodyBytes = maximumBodyBytes; this.maximumStreamMs = maximumStreamMs; this.upstreamHeadersMs = upstreamHeadersMs;
-    this.proofNonce = nonce(); this.enabled = false; this.closing = false; this.active = new Set(); this.sockets = new Set(); this.requests = 0;
+    this.proofNonce = nonce(); this.enabled = false; this.closing = false; this.active = new Set(); this.sockets = new Set(); this.websockets = new Set(); this.requests = 0;
   }
   async start(port = 0) {
     this.server = createServer({ maxHeaderSize: 32 * 1024 }, (req, res) => { void this.http(req, res); });
@@ -194,7 +194,12 @@ export class Gate {
       const transport = target.protocol === 'https:' ? httpsRequest : httpRequest;
       const request = transport({ ...target, method: 'GET', path: `${url.pathname}${url.search}`, headers: cleanHeaders(req.headers, { host: this.host, cookie, upgrade: true }) });
       let remote, reported = false, intentional = null;
-      const report = (status, extra) => { if (reported || this.closing) return; reported = true; this.reportFault({ status, channel: 'websocket', ...extra }); };
+      const report = (status, extra) => {
+        if (reported || this.closing) return;
+        reported = true; this.websockets.delete(socket);
+        if (status === 'websocket-closed' && this.websockets.size) return;
+        this.reportFault({ status, channel: 'websocket', ...extra });
+      };
       const stop = kind => { if (kind) intentional = kind; socket.destroy(); remote?.destroy(); request.destroy(); };
       this.active.add(stop);
       const timer = setTimeout(() => stop('websocket-closed'), Math.max(1, Math.min(identity.expiresAt - Date.now(), this.maximumStreamMs))); timer.unref();
@@ -210,7 +215,7 @@ export class Gate {
         if (upstreamHead.length) socket.write(upstreamHead); if (head.length) upstream.write(head);
         upstream.on('error', () => { report(intentional || 'upstream-failed'); stop(); });
         upstream.once('close', () => { report(intentional || 'websocket-closed'); socket.destroy(); });
-        socket.pipe(upstream).pipe(socket); this.onEvidence('websocket');
+        this.websockets.add(socket); socket.pipe(upstream).pipe(socket); this.onEvidence('websocket');
       });
       request.once('response', response => {
         if (response.statusCode === 401) { this.adapter.invalidate(); report('auth-rejected'); }
@@ -228,6 +233,7 @@ export class Gate {
     this.closing = true; this.enabled = false;
     for (const stop of this.active) stop();
     for (const socket of this.sockets) socket.destroy();
+    this.websockets.clear();
     if (this.server) await new Promise(resolve => this.server.close(resolve));
     this.adapter.invalidate();
   }

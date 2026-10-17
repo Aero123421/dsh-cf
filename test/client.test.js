@@ -239,7 +239,7 @@ test('locale registration survives an already-registered language and exposes En
   let meta;
   const ctx = {
     get: name => (name === 'locale' ? locale : { rpc: { async call() { return { ok: false }; } } }),
-    effect() {},
+    effect(fn) { return fn(); },
     slots: { inject(_name, run) { run(); }, register(value) { meta = value; } },
   };
   plugin.apply(ctx);
@@ -253,4 +253,52 @@ test('locale registration survives an already-registered language and exposes En
   locale.register = () => { throw new Error('locale namespace "dsh-cf" already has locale "en"'); };
   locale.addLanguage = () => { throw new Error('locale "ja" is already registered'); };
   assert.doesNotThrow(() => plugin.apply(ctx));
+});
+
+test('snapshots cross Host restarts but reject late replies from retired Hosts', async () => {
+  const { SnapshotCursor } = await load(), cursor = new SnapshotCursor();
+  assert.equal(cursor.accept({ generation: 'old', sequence: 90 }), 'accepted');
+  assert.equal(cursor.accept({ generation: 'old', sequence: 89 }), null);
+  assert.equal(cursor.accept({ generation: 'malformed', sequence: null }), null);
+  assert.equal(cursor.accept({ generation: 'old', sequence: 91 }), 'accepted');
+  assert.equal(cursor.accept({ generation: 'new', sequence: 0 }), 'replaced');
+  assert.equal(cursor.accept({ generation: 'old', sequence: 100 }), null);
+  assert.equal(cursor.accept({ generation: 'new', sequence: 1 }), 'accepted');
+  assert.equal(cursor.accept({ sequence: 100 }), null);
+});
+test('late mutation errors cannot repaint a new Host generation', async () => {
+  const { PanelSession } = await load(); let reject;
+  const session = new PanelSession(() => new Promise((_resolve, fail) => { reject = fail; }));
+  const pending = session.mutate('start', {});
+  ++session.epoch; session.busy = false;
+  reject(new Error('old Host failure'));
+  assert.equal((await pending).dropped, true);
+});
+test('locale teardown removes owned registrations and reload uses the new dictionary', async () => {
+  const plugin = await load(), effects = [], dictionaries = new Map(), languages = new Map([['ja', 'external']]);
+  const locale = {
+    register(ns, lang, dict) {
+      const pairs = typeof lang === 'string' ? [[lang, dict]] : Object.entries(lang);
+      for (const [id] of pairs) assert(!dictionaries.has(id));
+      for (const [id, value] of pairs) dictionaries.set(id, value);
+      return () => { for (const [id] of pairs) dictionaries.delete(id); };
+    },
+    addLanguage(value) { if (languages.has(value.id)) throw new Error('already registered'); languages.set(value.id, value); return () => languages.delete(value.id); },
+    bind: () => () => 'Cloudflare',
+  };
+  const ctx = { get: name => name === 'locale' ? locale : { rpc: {} }, effect(fn) { const off = fn(); effects.push(off); }, slots: { inject(_n, fn) { return fn(); }, register() {} } };
+  plugin.apply(ctx); assert.equal(dictionaries.size, 3);
+  for (const off of effects.splice(0).reverse()) off?.();
+  assert.equal(dictionaries.size, 0); assert.equal(languages.get('ja'), 'external');
+  const fresh = await load(); fresh.COPY.en.headline = 'new dictionary'; fresh.apply(ctx);
+  assert.equal(dictionaries.get('en').headline, 'new dictionary');
+});
+test('failure messages are localized and never display raw remote text or unsafe codes', async () => {
+  const { errorMessage, translate } = await load();
+  for (const lang of ['en', 'ja', 'zh']) {
+    const t = (key, params) => translate(lang, key, params);
+    assert.equal(errorMessage(t, { code: 'SETUP_CHANGED', message: 'SECRET' }), t('identityLocked') + ' (SETUP_CHANGED)');
+    assert(!errorMessage(t, { code: 'CF_403', message: 'SECRET' }).includes('SECRET'));
+    assert.equal(errorMessage(t, { code: 'SECRET/token' }), t('errorGeneral'));
+  }
 });

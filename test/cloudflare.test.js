@@ -1,10 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Cloudflare, provision, removeOwned, validateAccess } from '../src/cloudflare.js';
+import { Cloudflare, provision, removeOwned, validateAccess, inspectPending } from '../src/cloudflare.js';
 import { parseConnectorToken } from '../src/store.js';
 import { ACCOUNT, SETUP, AUD, TUNNEL, connectorToken, tokenSecret, fakeCloudflare, memoryStore, reply } from './helpers.js';
 import { CfError, safeError } from '../src/common.js';
 const make = () => { const api = fakeCloudflare(); return { ...api, cf: new Cloudflare('test-management-token-123456789', api.fetchImpl), store: memoryStore() }; };
+test('unknown-write inspection matches exact markers and never writes, adopts or clears a checkpoint', async () => {
+  const f = make(), marker = `dsh-cf-${f.store.state.instanceId}`;
+  f.store.state.setup = SETUP;
+  f.store.state.pending = { kind: 'access', marker, at: '2026-10-18T00:00:00Z', path: '/untrusted/path' };
+  f.data.apps.push({ id: 'owned-app', name: marker, domain: SETUP.hostname, secret: 'DO-NOT-EXPOSE' }, { id: 'unrelated', name: 'similar-name', domain: SETUP.hostname });
+  const before = JSON.stringify(f.store.state);
+  const result = await inspectPending(f.cf, f.store);
+  assert.equal(result.status, 'found'); assert.deepEqual(result.matches, [{ id: 'owned-app', recorded: false }]);
+  assert.equal(JSON.stringify(f.store.state), before); assert.equal(f.data.writes.length, 0);
+  assert(!JSON.stringify(result).includes('DO-NOT-EXPOSE'));
+  f.store.state.owned.appId = 'another-id';
+  assert.equal((await inspectPending(f.cf, f.store)).status, 'ambiguous');
+  f.data.apps = [];
+  assert.equal((await inspectPending(f.cf, f.store)).status, 'not-found');
+  f.store.state.pending.marker = 'another-instance';
+  await assert.rejects(inspectPending(f.cf, f.store), { code: 'WRITE_UNKNOWN' });
+});
+for (const kind of ['tunnel', 'dns', 'authentication', 'session']) test(`read-only ${kind} inspection keeps resource IDs and the checkpoint unchanged`, async () => {
+  const f = make(); await provision(f.cf, f.store, await f.cf.validateSetup(SETUP), 4000);
+  const marker = `dsh-cf-${f.store.state.instanceId}`, writes = f.data.writes.length;
+  f.store.state.pending = { kind, marker, at: '2026-10-18T00:00:00Z' };
+  const before = JSON.stringify(f.store.state);
+  const result = await inspectPending(f.cf, f.store);
+  assert.equal(result.status, 'found'); assert.equal(result.matches[0].recorded, true);
+  assert.equal(JSON.stringify(f.store.state), before); assert.equal(f.data.writes.length, writes);
+});
+test('cancelled pending inspection cannot publish a stale result', async () => {
+  const f = make(), abort = new AbortController();
+  f.store.state.setup = SETUP;
+  f.store.state.pending = { kind: 'access', marker: `dsh-cf-${f.store.state.instanceId}` };
+  f.cf.list = async () => { abort.abort(); return []; };
+  await assert.rejects(inspectPending(f.cf, f.store, abort.signal), { name: 'AbortError' });
+  assert(f.store.state.pending); assert.equal(f.data.writes.length, 0);
+});
 test('provision builds an owner/WebAuthn app before tunnel and DNS; retry does not duplicate writes', async () => {
   const f = make(); const setup = await f.cf.validateSetup(SETUP);
   await provision(f.cf, f.store, setup, 4000);
