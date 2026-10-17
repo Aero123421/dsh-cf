@@ -38,6 +38,8 @@ function http(port, { path = '/', method = 'GET', headers = {}, body } = {}) {
 }
 let child, gate, socket;
 try {
+  try { await command('pnpm', ['--version']); }
+  catch { throw new Error('DSH plugin installation needs pnpm on PATH. Install it with npm install -g pnpm@11.25.0 before this smoke.'); }
   const runtime = process.env.DSH_CF_DSH_ROOT ? resolve(process.env.DSH_CF_DSH_ROOT) : join(directory, 'runtime');
   if (!process.env.DSH_CF_DSH_ROOT) await command('npm', ['install', '--prefix', runtime, '--ignore-scripts', '--no-audit', '--no-fund', `@deepseek-ai/dsh@${selector}`]);
   const runtimeVersion = JSON.parse(await readFile(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'), 'utf8')).version;
