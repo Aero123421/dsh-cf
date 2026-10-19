@@ -745,3 +745,17 @@ test('the Store.open failure view explains the problem and refuses everything el
   assert.match((await corrupt.handle('status', {}, { management: true })).issue.message, /state\.json/);
   assert.equal(controller.bootResume(), false); await controller.dispose();
 });
+
+for (const control of ['cancel', 'pause']) test(`${control} during resume persistence prevents a late connector start`, async t => {
+  const f = await fixture(t, { state: { ...savedState(), paused: true } }); await withToken(f);
+  const entered = deferred(), release = deferred(), save = f.store.save.bind(f.store);
+  let first = true;
+  f.store.save = async () => { if (first) { first = false; entered.resolve(); await release.promise; } return save(); };
+  const starting = f.act('resume'); await entered.promise;
+  const stopping = f.act(control);
+  await tick(); release.resolve();
+  await Promise.all([starting, stopping]); await f.settle();
+  assert.equal(f.connectors.length, 0, 'a cancelled resume must never publish later');
+  assert.equal(f.controller.gate, null);
+  if (control === 'pause') assert.equal(f.store.state.paused, true);
+});

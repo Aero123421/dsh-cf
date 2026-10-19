@@ -412,6 +412,11 @@ test('mode-change readback failures are ordinary errors: the write is known, so 
   };
   await assert.rejects(provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000), { code: 'CF_403' });
   assert.equal(f.store.state.pending, null); assert.deepEqual(f.store.state.setup, SETUP);
+  f.data.fail = null;
+  const writes = f.data.writes.length;
+  await provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000);
+  assert.equal(f.store.state.setup.requireWebAuthn, false);
+  assert.equal(f.data.writes.length, writes, 'retry reads the applied mode without replaying the PUT');
 });
 
 test('mode-change rejected writes preserve the previous setup and clear only the pending write', async () => {

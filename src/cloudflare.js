@@ -302,8 +302,9 @@ async function updateApp(cf, store, setup, gatePath, beforeWrite, signal) {
   let validated = s.setup, app;
   try { app = await validateAccess(cf, validated, owned, s.instanceId, signal); }
   catch (error) {
-    // A checkpoint from an older version may mean the mode switch did land.
-    if (!(legacy && error.code === 'MFA_CHANGED' && requiresWebAuthn(s.setup) !== requiresWebAuthn(setup))) throw error;
+    // A previous PUT may have landed before readback failed. Accept only the explicitly requested
+    // target mode after rechecking ownership, audience, IdP and every policy; never infer another mode.
+    if (!(error.code === 'MFA_CHANGED' && requiresWebAuthn(s.setup) !== requiresWebAuthn(setup))) throw error;
     validated = setup; app = await validateAccess(cf, validated, owned, s.instanceId, signal);
   }
   if (legacy) { s.pending = null; await store.save(); }

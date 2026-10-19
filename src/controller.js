@@ -224,12 +224,12 @@ export class Controller {
         demand(payload.approved === true, 'CONSENT', 'Review and explicitly approve the additive organization MFA change.');
         return this.account(payload, true);
       case 'start': {
-        this.hostConfirmed(); this.cancelRetry(); await this.setPaused(false);
-        return this.launch('start', signal => this.start(payload, signal, false));
+        this.hostConfirmed(); this.cancelRetry();
+        return this.launch('start', async signal => { await this.setPaused(false); signal.throwIfAborted(); return this.start(payload, signal, false); });
       }
       case 'resume': {
-        this.hostConfirmed(); this.cancelRetry(); await this.setPaused(false);
-        return this.launch('resume', signal => this.start({}, signal, true));
+        this.hostConfirmed(); this.cancelRetry();
+        return this.launch('resume', async signal => { await this.setPaused(false); signal.throwIfAborted(); return this.start({}, signal, true); });
       }
       case 'host/confirm': {
         demand(payload.approved === true, 'CONSENT', 'Confirm that no other DSH uses this profile’s Tunnel.');
@@ -596,13 +596,16 @@ export class Controller {
     this.forgetting?.abort.abort(new DOMException('Cancelled', 'AbortError'));
     return Promise.allSettled([operation?.promise, this.forgetting?.promise, ...[...this.requests].map(request => request.promise)]).then(() => this.changed());
   }
-  /** Stops everything this controller runs. It persists nothing: dispose and ownership loss use it. */
-  shutdown() {
+  /** Stops everything this controller runs. Only an explicit pause persists the stopped preference. */
+  shutdown({ pause = false } = {}) {
     if (this.stopping) return this.stopping;
     this.cancelRetry();
     const stopping = Promise.resolve().then(async () => {
       await this.cancel();
-      await this.closeRuntime();
+      // Drain setup/resume first, then persist the pause before releasing the shutdown lock.
+      // Even a failed save must stop publication.
+      try { if (pause && this.store.state.setup) await this.setPaused(true); }
+      finally { await this.closeRuntime(); }
       this.evidence = {}; this.warning = null; this.failure = null; this.steps = freshSteps();
       this.step('tunnel', 'idle', 'Stopped locally; Cloudflare resources are retained'); this.changed();
     }).finally(() => { if (this.stopping === stopping) this.stopping = null; this.changed(); });
@@ -610,15 +613,7 @@ export class Controller {
     return stopping;
   }
   /** The user's pause: stop, and remember it so a DSH restart does not reconnect. The auto-connect preference is unchanged. */
-  async pauseNow() {
-    this.cancelRetry();
-    let failure;
-    if (this.store.state.setup) {
-      try { this.store.state.paused = true; await this.store.save(); } catch (error) { failure = error; }
-    }
-    await this.shutdown();
-    if (failure) throw failure;
-  }
+  pauseNow() { return this.shutdown({ pause: true }); }
   async dispose() {
     this.disposed = true;
     // Always release profile ownership, even if stopping the runtime fails, so a reload can reopen it.

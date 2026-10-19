@@ -28,7 +28,7 @@ npm install -g @deepseek-ai/dsh@0.2.1-rc.2 pnpm@11.25.0
 プラグインは公開タグを指定して導入します。
 
 ```sh
-dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.7'
+dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.8'
 ```
 
 実行中のDSHを再起動し、**設定 → Cloudflare** を開きます。同じプロファイルのDSHを二重起動しないでください。
