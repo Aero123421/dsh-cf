@@ -61,7 +61,8 @@ function readBody(req, limit) {
 
 /**
  * @param connection - DSH Connection service of the current Connection generation.
- * @param handle - `(endpoint, payload) => Promise<{ok: true, value} | {ok: false, error}>`; must not throw.
+ * @param handle - `(endpoint, payload, {management}) => Promise<{ok: true, value} | {ok: false, error}>`; must not throw.
+ *   `management` is decided per request by `isManagementRequest`; the handler builds the full or the reduced status from it.
  * @returns a WebServer prefix route for `webServer.register()`.
  */
 export function rpcRoute(connection, handle) {
@@ -76,7 +77,7 @@ export function rpcRoute(connection, handle) {
       }
       let url; try { url = new URL(req.url, 'http://local.invalid'); } catch { return text(res, 404, 'not found'); }
       const endpoint = endpointOf(url.pathname);
-      // status is the only public read. Every other action changes state or can return a secret.
+      // status is the only public read, and it is reduced unless the request is a management request. Every other action changes state or can return a secret.
       if (endpoint !== undefined && endpoint !== 'status' && !isManagementRequest(req)) return text(res, 403, 'management connection required');
       if (req.method !== 'POST' || endpoint === undefined || url.search) return text(res, 404, 'not found');
       if (String(req.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase() !== 'application/json') return text(res, 415, 'content type must be application/json');
@@ -87,7 +88,7 @@ export function rpcRoute(connection, handle) {
       const valid = body && typeof body === 'object' && !Array.isArray(body) && body.type === 'client-request' && typeof body.rpcId === 'string' && typeof body.method === 'string';
       if (!valid) return respond(res, typeof body?.rpcId === 'string' ? body.rpcId : 'invalid-request', badRequest('invalid client-request message'));
       if (body.method !== endpoint) return respond(res, body.rpcId, badRequest(`method ${JSON.stringify(body.method)} does not match endpoint ${JSON.stringify(endpoint)}`));
-      respond(res, body.rpcId, await handle(endpoint, body.payload));
+      respond(res, body.rpcId, await handle(endpoint, body.payload, { management: isManagementRequest(req) }));
     },
   };
 }

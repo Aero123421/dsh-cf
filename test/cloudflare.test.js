@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Cloudflare, provision, removeOwned, validateAccess, inspectPending } from '../src/cloudflare.js';
+import { Cloudflare, provision, removeOwned, validateAccess, inspectPending, resolvePending } from '../src/cloudflare.js';
 import { parseConnectorToken } from '../src/store.js';
 import { ACCOUNT, SETUP, AUD, TUNNEL, connectorToken, tokenSecret, fakeCloudflare, memoryStore, reply } from './helpers.js';
 import { CfError, safeError } from '../src/common.js';
@@ -126,23 +126,21 @@ test('initial ingress write must read back the requested routing before DNS is c
     if (method === 'PUT' && p.endsWith('/configurations')) body.config.ingress = [];
   };
   await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'TUNNEL_CHANGED' });
-  assert.equal(f.store.state.owned.ingressConfigured, undefined);
   assert.equal(f.data.records.length, 0);
   assert.equal(f.store.saves.at(-1).owned.tunnelId, TUNNEL);
   assert.equal(f.store.saves.at(-1).pending, null);
   f.data.fail = null; await removeOwned(f.cf, f.store);
   assert.deepEqual(f.store.state.owned, {});
 });
-test('an unavailable initial ingress readback retains owned IDs and retry does not duplicate resources', async () => {
+test('an unavailable ingress read retains owned IDs and retry does not duplicate resources', async () => {
   const f = make();
   f.data.fail = ({ p, method }) => { if (method === 'GET' && p.endsWith('/configurations')) throw new Error('readback unavailable'); };
   await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_NETWORK' });
-  assert.equal(f.store.state.owned.ingressConfigured, undefined);
   assert.equal(f.store.saves.at(-1).owned.tunnelId, TUNNEL);
   assert.equal(f.store.state.pending, null);
   f.data.fail = null; await provision(f.cf, f.store, SETUP, 4000);
-  assert.equal(f.store.state.owned.ingressConfigured, true);
   assert.equal(f.data.writes.filter(w => w.method === 'POST').length, 3);
+  assert.equal(f.data.writes.filter(w => w.method === 'PUT' && w.p.endsWith('/configurations')).length, 1);
 });
 test('initial DNS readback rejects an unproxied record while retaining its ID for cleanup', async () => {
   const f = make();
@@ -323,7 +321,7 @@ test('Access-only sign-in requires explicit false, validates input and does not 
   }
   const setup = await f.cf.validateSetup({ ...SETUP, requireWebAuthn: false });
   await provision(f.cf, f.store, setup, 4000);
-  assert.deepEqual(f.data.apps[0].mfa_config, { mfa_disabled: true });
+  assert.equal('mfa_config' in f.data.apps[0], false, 'Access-only apps are created without mfa_config');
   assert.deepEqual(f.data.policies.get('app-1')[0].include, [{ email: { email: SETUP.ownerEmail } }]);
   assert.equal(f.data.apps[0].session_duration, '168h');
   assert(f.store.state.owned.audience);
@@ -341,7 +339,7 @@ test('Access-only mode still rejects bypass policies, another owner and mismatch
     const policy = f.data.policies.get('app-1')[0];
     if (change === 'bypass') policy.decision = 'bypass';
     if (change === 'owner') policy.include[0].email.email = 'other@example.com';
-    if (change === 'mfa') f.data.apps[0].mfa_config.mfa_disabled = false;
+    if (change === 'mfa') f.data.apps[0].mfa_config = { mfa_disabled: false };
     if (change === 'policyMfa') policy.mfa_config = { mfa_disabled: false, allowed_authenticators: ['totp'] };
     await assert.rejects(validateAccess(f.cf, setup, f.store.state.owned, f.store.state.instanceId));
   }
@@ -377,19 +375,35 @@ test('unrelated setup changes and pre-existing policy overrides cannot be change
   }
 });
 
-test('lost mode-change response blocks retries and never records a successful authentication change', async () => {
+test('a lost mode-change response is settled by reading the application back: nothing is recorded as pending', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000);
   const setup = { ...SETUP, requireWebAuthn: false };
   f.data.fail = ({ method, p }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) throw new Error('connection lost'); };
   await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'CF_NETWORK' });
-  assert.equal(f.store.state.pending.kind, 'authentication'); assert.deepEqual(f.store.state.setup, SETUP);
-  const before = f.data.writes.length;
+  assert.equal(f.store.state.pending, null); assert.deepEqual(f.store.state.setup, SETUP, 'the old mode is still recorded: the app was not changed');
   f.data.fail = null;
-  await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'WRITE_UNKNOWN' });
-  assert.equal(f.data.writes.length, before);
+  await provision(f.cf, f.store, setup, 4000);
+  assert.equal(f.store.state.setup.requireWebAuthn, false); assert.equal(f.store.state.pending, null);
 });
 
-test('mode-change readback failures remain pending even if readback returns 403', async () => {
+test('a mode change that landed although its response was lost is recognized as applied', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  const setup = { ...SETUP, requireWebAuthn: false };
+  f.data.fail = ({ method, p, body }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) { Object.assign(f.data.apps[0], body); throw new Error('connection lost after commit'); } };
+  await provision(f.cf, f.store, setup, 4000);
+  assert.equal(f.store.state.setup.requireWebAuthn, false); assert.equal(f.store.state.pending, null);
+  assert.equal(f.store.state.proven, false);
+});
+
+test('an application changed by somebody else during a lost update is reported, not guessed at', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  f.data.fail = ({ method, p }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) { f.data.apps[0].session_duration = '30m'; throw new Error('lost'); } };
+  f.data.apps[0].session_duration = '1h';
+  await assert.rejects(provision(f.cf, f.store, { ...SETUP }, 4000), { code: 'ACCESS_CHANGED' });
+  assert.equal(f.store.state.pending, null);
+});
+
+test('mode-change readback failures are ordinary errors: the write is known, so no checkpoint is kept', async () => {
   const f = make(); await provision(f.cf, f.store, SETUP, 4000);
   let updated = false;
   f.data.fail = ({ method, p }) => {
@@ -397,7 +411,7 @@ test('mode-change readback failures remain pending even if readback returns 403'
     if (updated && method === 'GET' && p.endsWith('/access/apps/app-1')) return Response.json({ success: false }, { status: 403 });
   };
   await assert.rejects(provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000), { code: 'CF_403' });
-  assert.equal(f.store.state.pending.kind, 'authentication'); assert.deepEqual(f.store.state.setup, SETUP);
+  assert.equal(f.store.state.pending, null); assert.deepEqual(f.store.state.setup, SETUP);
 });
 
 test('mode-change rejected writes preserve the previous setup and clear only the pending write', async () => {
@@ -435,21 +449,218 @@ test('a policy session override is not silently extended or reported as a week',
   }
 });
 
-test('a session update with a lost response stays pending and is never replayed', async () => {
+test('a session update with a lost response is not recorded as pending and may be repeated', async () => {
   const f = make(), setup = { ...SETUP, requireWebAuthn: false };
   await provision(f.cf, f.store, setup, 4000); f.data.apps[0].session_duration = '1h';
   f.data.fail = ({ method, p }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) throw new Error('lost'); };
   await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'CF_NETWORK' });
-  assert.equal(f.store.state.pending.kind, 'session');
-  const before = f.data.writes.length; f.data.fail = null;
-  await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'WRITE_UNKNOWN' });
-  assert.equal(f.data.writes.length, before);
+  assert.equal(f.store.state.pending, null);
+  f.data.fail = null;
+  await provision(f.cf, f.store, setup, 4000);
+  assert.equal(f.data.apps[0].session_duration, '168h');
 });
 
-test('a session update must read back the requested one-week duration', async () => {
+test('a session update that landed although its response was lost counts as done', async () => {
+  const f = make(), setup = { ...SETUP, requireWebAuthn: false };
+  await provision(f.cf, f.store, setup, 4000); f.data.apps[0].session_duration = '1h';
+  f.data.fail = ({ method, p, body }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) { Object.assign(f.data.apps[0], body); throw new Error('lost after commit'); } };
+  await provision(f.cf, f.store, setup, 4000);
+  assert.equal(f.store.state.pending, null); assert.equal(f.data.apps[0].session_duration, '168h');
+});
+
+test('a session update must read back the requested one-week duration, and a mismatch is an ordinary error', async () => {
   const f = make(), setup = { ...SETUP, requireWebAuthn: false };
   await provision(f.cf, f.store, setup, 4000); f.data.apps[0].session_duration = '1h';
   f.data.fail = ({ method, p, body }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) body.session_duration = '1h'; };
   await assert.rejects(provision(f.cf, f.store, setup, 4000), { code: 'SESSION_CHANGED' });
-  assert.equal(f.store.state.pending.kind, 'session');
+  assert.equal(f.store.state.pending, null);
+});
+
+test('a read-back mismatch after a successful PUT is an ordinary error and keeps no checkpoint', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  f.data.apps[0].session_duration = '24h';
+  f.data.fail = ({ method, p }) => { if (method === 'PUT' && /access\/apps\//.test(p)) { f.data.apps[0].session_duration = '168h'; f.data.apps[0].allowed_idps = ['other']; return reply(f.data.apps[0]); } };
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'IDP_CHANGED' });
+  assert.equal(f.store.state.pending, null);
+});
+
+test('a session-only update keeps verification and auto-connect; only an authentication mode change clears them', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  Object.assign(f.store.state, { proven: true, autoConnect: true, lastVerifiedAt: 'verified' });
+  f.data.apps[0].session_duration = '1h';
+  await provision(f.cf, f.store, SETUP, 4000);
+  assert.equal(f.data.apps[0].session_duration, '168h');
+  assert.equal(f.store.state.proven, true); assert.equal(f.store.state.autoConnect, true); assert.equal(f.store.state.lastVerifiedAt, 'verified');
+  await provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000);
+  assert.equal(f.store.state.proven, false); assert.equal(f.store.state.autoConnect, false); assert.equal(f.store.state.lastVerifiedAt, null);
+});
+
+test('legacy session and authentication checkpoints are re-validated by the next provisioning and then cleared', async () => {
+  for (const kind of ['session', 'authentication']) {
+    const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+    f.store.state.pending = { kind, path: '/old', marker: `dsh-cf-${f.store.state.instanceId}`, at: '2026-10-01T00:00:00Z' };
+    await provision(f.cf, f.store, SETUP, 4000);
+    assert.equal(f.store.state.pending, null, kind);
+  }
+  // An authentication switch that did land before the old checkpoint was left behind.
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  f.data.apps[0].mfa_config = { mfa_disabled: true };
+  f.store.state.pending = { kind: 'authentication', marker: `dsh-cf-${f.store.state.instanceId}`, at: 'x' };
+  await provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000);
+  assert.equal(f.store.state.pending, null); assert.equal(f.store.state.setup.requireWebAuthn, false);
+  // A different, unexpected state still stops.
+  const g = make(); await provision(g.cf, g.store, SETUP, 4000);
+  g.data.apps[0].mfa_config = { mfa_disabled: true };
+  g.store.state.pending = { kind: 'authentication', marker: 'x', at: 'x' };
+  await assert.rejects(provision(g.cf, g.store, SETUP, 4000), { code: 'MFA_CHANGED' });
+});
+
+test('Access-only switching sends an explicit disable, and readback accepts absent, null or disabled application MFA', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  await provision(f.cf, f.store, { ...SETUP, requireWebAuthn: false }, 4000);
+  assert.deepEqual(f.data.writes.filter(w => w.method === 'PUT' && w.p.endsWith('/access/apps/app-1')).at(-1).body.mfa_config, { mfa_disabled: true });
+  const setup = { ...SETUP, requireWebAuthn: false };
+  for (const value of [undefined, null, { mfa_disabled: true }]) {
+    if (value === undefined) delete f.data.apps[0].mfa_config; else f.data.apps[0].mfa_config = value;
+    await validateAccess(f.cf, setup, f.store.state.owned, f.store.state.instanceId);
+  }
+  for (const value of [{}, { mfa_disabled: false }]) {
+    f.data.apps[0].mfa_config = value;
+    await assert.rejects(validateAccess(f.cf, setup, f.store.state.owned, f.store.state.instanceId), { code: 'MFA_CHANGED' });
+  }
+  f.data.apps[0].mfa_config = { mfa_disabled: true };
+  await provision(f.cf, f.store, SETUP, 4000);
+  assert.deepEqual(f.data.apps[0].mfa_config, { mfa_disabled: false, allowed_authenticators: ['biometrics', 'security_key'], session_duration: '1h' });
+});
+
+test('the previous configuration check survives reads that fail and is voided only right before a write or by a mismatch', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  f.store.state.lastConfigurationCheck = '2026-10-01T00:00:00Z';
+  f.data.fail = ({ method, p }) => { if (method === 'GET' && p.endsWith('/dns_records')) throw new TypeError('fetch failed'); };
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_NETWORK' });
+  assert.equal(f.store.state.lastConfigurationCheck, '2026-10-01T00:00:00Z');
+  f.data.fail = null; f.data.apps[0].session_duration = '1h';
+  f.data.fail = ({ method, p }) => { if (method === 'PUT' && p.endsWith('/access/apps/app-1')) throw new TypeError('lost'); };
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_NETWORK' });
+  assert.equal(f.store.state.lastConfigurationCheck, null, 'a write was attempted');
+});
+
+test('a failed first attempt with a definitive 4xx leaves the identity fields editable until a resource exists', async () => {
+  const f = make();
+  f.data.fail = ({ method, p }) => method === 'POST' && p.endsWith('/access/apps') ? Response.json({ success: false }, { status: 403 }) : null;
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_403' });
+  assert.deepEqual(Object.keys(f.store.state.owned), []);
+  f.data.fail = null;
+  const fixed = { ...SETUP, hostname: 'fixed.example.com' };
+  await provision(f.cf, f.store, fixed, 4000);
+  assert.equal(f.store.state.setup.hostname, 'fixed.example.com');
+  await assert.rejects(provision(f.cf, f.store, { ...SETUP }, 4000), { code: 'SETUP_CHANGED' });
+});
+
+test('responses are classified by HTTP status before the body: a non-JSON 4xx is definitive, a non-JSON 5xx is not', async () => {
+  const f = make();
+  f.data.fail = ({ method, p }) => method === 'POST' && p.endsWith('/access/apps') ? new Response('<html>403 Forbidden</html>', { status: 403 }) : null;
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_403' });
+  assert.equal(f.store.state.pending, null);
+  f.data.fail = ({ method, p }) => method === 'POST' && p.endsWith('/access/apps') ? new Response('<html>Bad gateway</html>', { status: 502 }) : null;
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4000), { code: 'CF_502' });
+  assert.equal(f.store.state.pending.kind, 'access');
+});
+
+test('the public hostname is exactly one label under the selected zone and deeper names fail before any write', async () => {
+  const f = make();
+  for (const hostname of ['a.b.example.com', 'deep.sub.dsh.example.com']) {
+    await assert.rejects(f.cf.validateSetup({ ...SETUP, hostname }), { code: 'HOSTNAME_DEPTH' });
+  }
+  await assert.rejects(f.cf.validateSetup({ ...SETUP, hostname: 'example.com' }), { code: 'ZONE' });
+  assert.equal((await f.cf.validateSetup({ ...SETUP, hostname: 'dsh.example.com' })).hostname, 'dsh.example.com');
+  assert.equal(f.data.writes.length, 0);
+});
+
+test('a missing Zero Trust organization and a missing identity provider have their own actionable errors', async () => {
+  const f = make();
+  f.data.fail = ({ p }) => p.endsWith('/access/organizations') ? Response.json({ success: false }, { status: 404 }) : null;
+  await assert.rejects(f.cf.account(ACCOUNT), error => error.code === 'NO_ZERO_TRUST' && /Zero Trust/.test(error.message));
+  f.data.fail = ({ p }) => p.endsWith('/access/identity_providers') ? reply([]) : null;
+  await assert.rejects(f.cf.account(ACCOUNT), error => error.code === 'NO_IDP' && /Authentication/.test(error.message));
+});
+
+test('the tunnel routing is written only when it differs: first time, or the local port moved on an owned tunnel', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  const puts = () => f.data.writes.filter(w => w.method === 'PUT' && w.p.endsWith('/configurations')).length;
+  assert.equal(puts(), 1);
+  await provision(f.cf, f.store, SETUP, 4000); assert.equal(puts(), 1, 'identical routing is not rewritten');
+  await provision(f.cf, f.store, SETUP, 4555); assert.equal(puts(), 2);
+  assert.equal(f.data.configs.get(TUNNEL).config.ingress[0].service, 'http://127.0.0.1:4555');
+  assert.equal(f.store.state.gatePort, 4555);
+  // Anything else in the routing is somebody else's configuration and is never overwritten.
+  f.data.configs.get(TUNNEL).config.ingress.unshift({ hostname: 'other.example.com', service: 'http://127.0.0.1:1' });
+  await assert.rejects(provision(f.cf, f.store, SETUP, 4555), { code: 'TUNNEL_CHANGED' });
+  assert.equal(puts(), 2);
+});
+
+test('unknown-write recovery: clear-recorded only when every exact match is the recorded ID', async () => {
+  const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+  const marker = `dsh-cf-${f.store.state.instanceId}`;
+  f.store.state.pending = { kind: 'access', marker, at: 'x', path: '/untrusted' };
+  const before = f.data.writes.length;
+  const result = await resolvePending(f.cf, f.store, 'clear-recorded');
+  assert.equal(f.store.state.pending, null); assert.equal(result.inspection.status, 'found'); assert.deepEqual(result.deleted, []);
+  assert.equal(f.data.writes.length, before, 'nothing was written to Cloudflare');
+  f.store.state.pending = { kind: 'access', marker, at: 'x' };
+  f.data.apps.push({ id: 'stray', name: marker, domain: SETUP.hostname });
+  await assert.rejects(resolvePending(f.cf, f.store, 'clear-recorded'), { code: 'WRITE_MISMATCH' });
+  assert(f.store.state.pending);
+  f.store.state.owned.appId = 'someone-elses';
+  await assert.rejects(resolvePending(f.cf, f.store, 'clear-recorded'), { code: 'WRITE_MISMATCH' });
+  await assert.rejects(resolvePending(f.cf, f.store, 'other'), { code: 'PAYLOAD' });
+});
+
+test('unknown-write recovery: delete-unrecorded removes only exact marker matches and never the recorded ID', async () => {
+  for (const kind of ['access', 'tunnel', 'dns']) {
+    const f = make(); await provision(f.cf, f.store, SETUP, 4000);
+    const marker = `dsh-cf-${f.store.state.instanceId}`, owned = { ...f.store.state.owned };
+    f.data.fail = null;
+    if (kind === 'access') f.data.apps.push({ id: 'stray-app', name: marker, domain: SETUP.hostname }, { id: 'lookalike', name: `${marker}-x`, domain: SETUP.hostname }, { id: 'other-host', name: marker, domain: 'other.example.com' });
+    if (kind === 'tunnel') f.data.tunnels.push({ id: 'stray-tunnel', name: marker }, { id: 'lookalike', name: 'dsh-cf-other' }, { id: 'deleted', name: marker, deleted_at: 'x' });
+    if (kind === 'dns') f.data.records.push({ id: 'stray-dns', name: SETUP.hostname, type: 'CNAME', comment: marker, content: 'whatever.example.com' }, { id: 'a-record', name: SETUP.hostname, type: 'A', comment: marker }, { id: 'no-comment', name: SETUP.hostname, type: 'CNAME', comment: 'mine' });
+    f.store.state.pending = { kind, marker, at: 'x', path: '/untrusted/ignored' };
+    const from = f.data.writes.length;
+    const result = await resolvePending(f.cf, f.store, 'delete-unrecorded');
+    assert.deepEqual(result.deleted.map(x => x.id), [`stray-${kind === 'access' ? 'app' : kind}`], kind);
+    const deletes = f.data.writes.slice(from).filter(w => w.method === 'DELETE');
+    assert(deletes.every(w => !w.p.includes(owned.appId) && !w.p.includes(owned.tunnelId) && !w.p.endsWith(owned.dnsId)), kind);
+    if (kind === 'tunnel') assert.deepEqual(deletes.map(w => w.p.split('/').slice(-2).join('/')), ['stray-tunnel/connections', 'cfd_tunnel/stray-tunnel'], kind);
+    assert.equal(f.store.state.pending, null); assert.deepEqual(f.store.state.owned, owned);
+    const left = [...f.data.apps, ...f.data.tunnels, ...f.data.records].map(x => x.id);
+    for (const keep of ['lookalike', 'other-host', 'deleted', 'a-record', 'no-comment'].filter(id => ({ access: ['lookalike', 'other-host'], tunnel: ['lookalike', 'deleted'], dns: ['a-record', 'no-comment'] })[kind].includes(id))) assert(left.includes(keep), `${kind} kept ${keep}`);
+    assert(!left.includes(`stray-${kind === 'access' ? 'app' : kind}`), kind);
+  }
+  const none = make(); await provision(none.cf, none.store, SETUP, 4000);
+  none.store.state.pending = { kind: 'access', marker: `dsh-cf-${none.store.state.instanceId}`, at: 'x' };
+  await assert.rejects(resolvePending(none.cf, none.store, 'delete-unrecorded'), { code: 'WRITE_MISMATCH' });
+  assert(none.store.state.pending);
+});
+
+test('unknown-write recovery: clear-not-found needs an empty inspection and writes nothing', async () => {
+  const f = make(); f.store.state.setup = SETUP;
+  const marker = `dsh-cf-${f.store.state.instanceId}`;
+  f.store.state.pending = { kind: 'access', marker, at: 'x' };
+  f.data.apps.push({ id: 'surprise', name: marker, domain: SETUP.hostname });
+  await assert.rejects(resolvePending(f.cf, f.store, 'clear-not-found'), { code: 'WRITE_MISMATCH' });
+  assert(f.store.state.pending);
+  f.data.apps = [];
+  const result = await resolvePending(f.cf, f.store, 'clear-not-found');
+  assert.equal(f.store.state.pending, null); assert.equal(result.inspection.status, 'not-found'); assert.equal(f.data.writes.length, 0);
+  await assert.rejects(resolvePending(f.cf, f.store, 'clear-not-found'), { code: 'WRITE_UNKNOWN' });
+});
+
+test('recovery cancelled mid-way deletes and clears nothing further', async () => {
+  const f = make(); f.store.state.setup = SETUP;
+  const marker = `dsh-cf-${f.store.state.instanceId}`, abort = new AbortController();
+  f.store.state.pending = { kind: 'access', marker, at: 'x' };
+  f.data.apps.push({ id: 'stray', name: marker, domain: SETUP.hostname });
+  f.data.fail = ({ method }) => { if (method === 'GET') abort.abort(); };
+  await assert.rejects(resolvePending(f.cf, f.store, 'delete-unrecorded', abort.signal), { name: 'AbortError' });
+  assert(f.store.state.pending); assert.equal(f.data.writes.length, 0);
 });

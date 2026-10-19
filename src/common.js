@@ -32,7 +32,7 @@ export function issuer(value) {
   return `https://${value}`;
 }
 export function safeError(error) {
-  // Do not serialize arbitrary remote responses, OAuth codes, cookies, argv, or request URLs.
+  // Do not serialize arbitrary remote responses, cookies, argv, or request URLs.
   if (error instanceof CfError) return { code: error.code, message: error.message, details: error.details };
   if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return { code: error.name, message: 'The operation was cancelled or timed out. Retry from the settings panel.' };
   return { code: 'INTERNAL', message: 'The operation failed. Check connectivity, file permissions, and the configured runtime. No authentication bypass was enabled.' };
