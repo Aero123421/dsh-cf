@@ -15,6 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: distribution contains no addLanguage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          ! rg -n "addLanguage" src
       - uses: actions/setup-node@v4
         with:
           node-version: 22
