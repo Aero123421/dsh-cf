@@ -8,6 +8,19 @@ import { Store, fingerprint, fingerprintV2, readMachineId } from '../src/store.j
 import { connectorToken, tokenSecret } from './helpers.js';
 import { ensureBinary, childEnv, supportedVersion, connectorArgs, Connector, CLOUDFLARED_VERSION, MINIMUM_VERSION } from '../src/connector.js';
 async function directory(t) { const dir = await mkdtemp(join(tmpdir(), 'dsh-cf-test-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; }
+/** PIDs whose argv[0] or argv[1] is this fixture. A zombie has an empty cmdline and is not included. */
+async function listedConnectors(binary) {
+  const { readdir } = await import('node:fs/promises');
+  const names = await readdir('/proc');
+  const pids = [];
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const cmd = await readFile(`/proc/${name}/cmdline`, 'utf8').catch(() => '');
+    const args = cmd.split('\0').filter(Boolean);
+    if (args[0] === binary || args[1] === binary) pids.push(Number(name));
+  }
+  return pids;
+}
 test('state is private, persists without credentials, and active profile locks are exclusive', async t => {
   const dir = await directory(t); const store = await new Store(dir).open(); t.after(() => store.close());
   await assert.rejects(new Store(dir).open(), { code: 'LOCK' });
@@ -269,6 +282,7 @@ setInterval(() => {}, 1000);
   });
   owner.kill('SIGSTOP');
   const samples = [];
+  const observed = new Set();
   let scanning = false;
   const sample = async () => {
     if (scanning) return;
@@ -280,7 +294,7 @@ setInterval(() => {}, 1000);
         if (!/^\d+$/.test(name)) continue;
         const cmd = await readFile(`/proc/${name}/cmdline`, 'utf8').catch(() => '');
         const args = cmd.split('\0').filter(Boolean);
-        if (args[0] === binary || args[1] === binary) count++;
+        if (args[0] === binary || args[1] === binary) { count++; observed.add(Number(name)); }
       }
       samples.push(count);
     } finally { scanning = false; }
@@ -298,15 +312,13 @@ await new Promise((resolve, reject) => { gate.once('error', reject); gate.listen
 const store = await new Store(dir, { heartbeatMs: 80 }).open();
 const record = store.inheritedConnector;
 if (!record) throw new Error('missing connector record');
-let outcome = await stopRecordedConnector(record);
-if (outcome !== 'stopped' && outcome !== 'replaced') {
-  process.send({ event: 'held', outcome, spawned: false, port: gate.address().port });
-  await new Promise(resolve => process.once('message', resolve));
-  outcome = await stopRecordedConnector(record);
-}
-if (outcome !== 'stopped' && outcome !== 'replaced') throw new Error('connector still ' + outcome);
+const outcome = await stopRecordedConnector(record);
+process.send({ event: 'held', outcome, spawned: false, port: gate.address().port });
+await new Promise(resolve => process.once('message', resolve));
+const again = await stopRecordedConnector(record);
+if (again !== 'stopped' && again !== 'replaced') throw new Error('connector still ' + again);
 const child = spawn(binary, [], { stdio: 'ignore' });
-process.send({ event: 'spawned', outcome, pid: child.pid, port: gate.address().port });
+process.send({ event: 'spawned', outcome: again, pid: child.pid, port: gate.address().port });
 setInterval(() => {}, 1000);
 `);
   const waiter = fork(waiterFile, [dir, binary], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
@@ -319,20 +331,24 @@ setInterval(() => {}, 1000);
     waiter.once('message', message => { clearTimeout(timer); resolve(message); });
     waiter.once('exit', code => { clearTimeout(timer); reject(new Error(`waiter exited ${code}: ${waiterLog.slice(0, 800)}`)); });
   });
-  let spawned = await nextMessage();
-  if (spawned.event === 'held') {
-    assert.equal(spawned.spawned, false);
-    assert.equal(spawned.outcome, 'stuck');
-    owner.kill('SIGCONT');
-    const reapBy = Date.now() + 4_000;
-    while (Date.now() < reapBy) {
-      const status = await readFile(`/proc/${ready.pid}/status`, 'utf8').catch(() => '');
-      if (!status) break;
-      await new Promise(r => setTimeout(r, 50));
-    }
-    waiter.send('retry', () => {});
-    spawned = await nextMessage();
+  const held = await nextMessage();
+  assert.equal(held.event, 'held');
+  assert.equal(held.spawned, false);
+  assert.equal(held.outcome, 'stuck');
+  const heldStatus = await readFile(`/proc/${ready.pid}/status`, 'utf8');
+  assert.match(heldStatus, /^State:\s+Z/m, 'SIGKILL left a zombie because the stopped parent has not reaped it');
+  assert.deepEqual([...observed].filter(pid => pid !== ready.pid), [], 'no second cloudflared while the zombie remains');
+  assert.deepEqual(await listedConnectors(binary), []);
+  owner.kill('SIGCONT');
+  const reapBy = Date.now() + 4_000;
+  while (Date.now() < reapBy) {
+    const status = await readFile(`/proc/${ready.pid}/status`, 'utf8').catch(() => '');
+    if (!status) break;
+    await new Promise(r => setTimeout(r, 50));
   }
+  const spawnedPromise = nextMessage();
+  waiter.send('retry', () => {});
+  const spawned = await spawnedPromise;
   for (let i = 0; i < 5; i++) { await sample(); await new Promise(r => setTimeout(r, 100)); }
   clearInterval(poll);
   assert.equal(spawned.event, 'spawned');
@@ -344,6 +360,141 @@ setInterval(() => {}, 1000);
   const oldStatus = await readFile(`/proc/${ready.pid}/status`, 'utf8').catch(() => '');
   if (oldStatus) assert.match(oldStatus, /^State:\s+Z/m, 'a stopped parent leaves a zombie, not a live cloudflared');
   try { process.kill(spawned.pid, 'SIGKILL'); } catch { /* already gone */ }
+});
+test('a successor shows LOCK and does not start cloudflared while a SIGKILL zombie still has a stopped parent', { skip: process.platform !== 'linux' }, async t => {
+  const { fork } = await import('node:child_process');
+  const dir = await directory(t);
+  const binary = join(dir, 'cloudflared');
+  await writeFile(binary, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o700 });
+  const ownerFile = join(dir, 'owner.mjs');
+  await writeFile(ownerFile, `import { spawn } from 'node:child_process';
+import { Store } from ${JSON.stringify(new URL('../src/store.js', import.meta.url).href)};
+import { readProcessStart } from ${JSON.stringify(new URL('../src/connector.js', import.meta.url).href)};
+import { SETUP, AUD, connectorToken } from ${JSON.stringify(new URL('./helpers.js', import.meta.url).href)};
+const dir = process.argv[2], binary = process.argv[3];
+const store = await new Store(dir, { heartbeatMs: 40 }).open();
+store.state.setup = { ...SETUP };
+store.state.owned = { audience: AUD, appId: 'app', tunnelId: 'tunnel', dnsId: 'dns' };
+store.state.lastConfigurationCheck = '2026-10-01T00:00:00.000Z';
+store.state.autoConnect = true;
+store.state.proven = true;
+await store.save();
+await store.writeToken(connectorToken());
+const child = spawn(binary, [], { stdio: 'ignore' });
+child.on('error', () => {});
+await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+const start = await readProcessStart(child.pid);
+if (start == null) throw new Error('start missing');
+await store.recordConnector({ pid: child.pid, start });
+process.send({ event: 'ready', pid: child.pid, start });
+setInterval(() => {}, 1000);
+`);
+  const owner = fork(ownerFile, [dir, binary], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  owner.on('error', () => {});
+  let ownerLog = '';
+  owner.stdout?.on('data', chunk => { ownerLog += chunk; });
+  owner.stderr?.on('data', chunk => { ownerLog += chunk; });
+  let successor;
+  t.after(async () => {
+    try { owner.kill('SIGCONT'); } catch { /* already gone */ }
+    await new Promise(r => setTimeout(r, 50));
+    for (const pid of await listedConnectors(binary).catch(() => [])) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    try { successor?.kill('SIGKILL'); } catch { /* already gone */ }
+    try { owner.kill('SIGKILL'); } catch { /* already gone */ }
+  });
+  const ready = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`owner did not start: ${ownerLog.slice(0, 800)}`)), 8_000);
+    owner.once('message', message => { clearTimeout(timer); resolve(message); });
+    owner.once('exit', code => { clearTimeout(timer); reject(new Error(`owner exited ${code}: ${ownerLog.slice(0, 800)}`)); });
+  });
+  assert.equal(ready.event, 'ready');
+  owner.kill('SIGSTOP');
+  const successorFile = join(dir, 'successor.mjs');
+  await writeFile(successorFile, `import { Store } from ${JSON.stringify(new URL('../src/store.js', import.meta.url).href)};
+import { Controller } from ${JSON.stringify(new URL('../src/controller.js', import.meta.url).href)};
+const dir = process.argv[2], binary = process.argv[3];
+const store = await new Store(dir, { heartbeatMs: 40 }).open();
+const controller = new Controller({
+  store,
+  adapter: { facts() {}, async trust() { return { added: null }; }, async untrust() { return 'reverted'; }, invalidate() {} },
+  fetchImpl: async () => new Response(null, { status: 302, headers: { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login' } }),
+  dependencies: { ensureBinary: async () => ({ path: binary, version: 'fixture', source: 'selected' }) },
+  retryDelaysMs: [40],
+  retryCapMs: 40,
+});
+controller.bootResume();
+const deadline = Date.now() + 12_000;
+let snap = controller.snapshot(true);
+while (Date.now() < deadline) {
+  snap = controller.snapshot(true);
+  if (snap.issue?.reason === 'stuck' && snap.status === 'error') break;
+  if (controller.connector?.cloudflaredPid || snap.status === 'online') break;
+  await new Promise(r => setTimeout(r, 40));
+}
+process.send({
+  event: 'result',
+  code: snap.issue?.code || null,
+  reason: snap.issue?.reason || null,
+  status: snap.status,
+  retryAt: snap.issue?.retryAt || null,
+  pid: controller.connector?.cloudflaredPid || null,
+  gate: controller.gate ? true : false,
+});
+await new Promise(r => setTimeout(r, 300));
+const later = controller.snapshot(true);
+process.send({
+  event: 'later',
+  code: later.issue?.code || null,
+  reason: later.issue?.reason || null,
+  status: later.status,
+  retryAt: later.issue?.retryAt || null,
+  pid: controller.connector?.cloudflaredPid || null,
+});
+setInterval(() => {}, 1000);
+`);
+  successor = fork(successorFile, [dir, binary], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  successor.on('error', () => {});
+  let successorLog = '';
+  successor.stdout?.on('data', chunk => { successorLog += chunk; });
+  successor.stderr?.on('data', chunk => { successorLog += chunk; });
+  const messages = [];
+  const waiters = [];
+  successor.on('message', message => { const resolve = waiters.shift(); if (resolve) resolve(message); else messages.push(message); });
+  successor.once('exit', code => {
+    const message = { event: 'exit', code, log: successorLog.slice(0, 800) };
+    const resolve = waiters.shift();
+    if (resolve) resolve(message); else messages.push(message);
+  });
+  const nextMessage = () => {
+    if (messages.length) return Promise.resolve(messages.shift());
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`successor did not answer: ${successorLog.slice(0, 800)}`)), 15_000);
+      waiters.push(message => { clearTimeout(timer); resolve(message); });
+    });
+  };
+  const result = await nextMessage();
+  const status = await readFile(`/proc/${ready.pid}/status`, 'utf8');
+  assert.match(status, /^State:\s+Z/m, 'the stopped parent has not reaped the cloudflared');
+  assert.equal(result.event, 'result');
+  assert.equal(result.code, 'LOCK');
+  assert.equal(result.reason, 'stuck');
+  assert.equal(result.status, 'error');
+  assert.equal(result.retryAt, null);
+  assert.equal(result.pid, null);
+  assert.equal(result.gate, false);
+  assert.deepEqual(await listedConnectors(binary), []);
+  const later = await nextMessage();
+  assert.equal(later.event, 'later');
+  assert.equal(later.code, 'LOCK');
+  assert.equal(later.reason, 'stuck');
+  assert.equal(later.retryAt, null);
+  assert.equal(later.pid, null);
+  assert.match(await readFile(`/proc/${ready.pid}/status`, 'utf8'), /^State:\s+Z/m);
+  assert.deepEqual(await listedConnectors(binary), []);
+  const lock = JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8'));
+  assert.equal(lock.connector, undefined);
 });
 test('a reused pid or a process that is not cloudflared is not killed', { skip: process.platform !== 'linux' }, async t => {
   const { spawn } = await import('node:child_process');
