@@ -165,3 +165,84 @@ test('an unusable profile state still serves the settings channel with an action
   assert.equal(reduced.canManage, false); assert.equal(reduced.issue.code, 'LOCK');
   await locked.dispose(); assert(holder.lock, 'the other owner keeps its lock');
 });
+test('an existing lock does not block plugin startup for the stale-lock observation', async t => {
+  const { Store } = await import('../src/store.js');
+  const live = await mkdtemp(join(tmpdir(), 'dsh-cf-startup-')); t.after(() => rm(live, { recursive: true, force: true }));
+  const dir = join(live, '.dsh-cf');
+  const holder = await new Store(dir, { heartbeatMs: 1_500 }).open();
+  t.after(() => holder.close());
+  const started = Date.now();
+  const locked = await dshHost(t, { config: { stateDirectory: dir, heartbeatMs: 1_500 } });
+  const elapsed = Date.now() - started;
+  // The stale observation is 1.6× the lock heartbeat (2.4s here). Startup must return before that.
+  assert(elapsed < 800, `apply waited ${elapsed}ms inside the observation`);
+  const status = JSON.parse((await locked.call('status')).body).result.value;
+  assert.equal(status.issue.code, 'LOCK');
+  assert.equal(JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8')).nonce, holder.lock);
+});
+test('reclaim delays start at two heartbeats and stop at one minute', async () => {
+  const { reclaimDelayMs } = await import('../src/index.js');
+  assert.equal(reclaimDelayMs(5_000, 0), 10_000);
+  assert.equal(reclaimDelayMs(5_000, 1), 20_000);
+  assert.equal(reclaimDelayMs(5_000, 2), 40_000);
+  assert.equal(reclaimDelayMs(5_000, 3), 60_000);
+  assert.equal(reclaimDelayMs(5_000, 8), 60_000);
+  assert.equal(reclaimDelayMs(40, 0), 80);
+});
+test('a heartbeating lock is not taken, and a stopped heartbeat is reclaimed without a second owner', async t => {
+  const { Store, fingerprint } = await import('../src/store.js');
+  const live = await mkdtemp(join(tmpdir(), 'dsh-cf-reclaim-')); t.after(() => rm(live, { recursive: true, force: true }));
+  const dir = join(live, '.dsh-cf');
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await writeFile(join(dir, 'state.json'), JSON.stringify({
+    version: 1, instanceId: '550e8400-e29b-41d4-a716-446655440000', machine: fingerprint(), autoConnect: true, gatePort: 0,
+    setup: { accountId: 'a'.repeat(32), zoneId: 'b'.repeat(32), hostname: 'dsh.example.com', ownerEmail: 'owner@example.com', idpId: 'p', teamDomain: 'team.cloudflareaccess.com' },
+    owned: { audience: 'c'.repeat(64), appId: 'a', tunnelId: 't', dnsId: 'd' }, pending: null, lastConfigurationCheck: '2026-10-01T00:00:00.000Z',
+  }));
+  const holder = await new Store(dir, { heartbeatMs: 40 }).open();
+  const nonce = holder.lock;
+  const closes = [];
+  const original = Store.prototype.close;
+  Store.prototype.close = async function () { closes.push(this.lock); return original.call(this); };
+  t.after(() => { Store.prototype.close = original; });
+  const locked = await dshHost(t, { config: { stateDirectory: dir, heartbeatMs: 40 } });
+  const read = async () => JSON.parse((await locked.call('status')).body).result.value;
+  assert.equal((await read()).issue.code, 'LOCK');
+  assert.equal(JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8')).nonce, nonce);
+  assert(closes.length >= 1, 'the failed open closes its store');
+  await new Promise(r => setTimeout(r, 350));
+  assert.equal(JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8')).nonce, nonce, 'a moving heartbeat is not taken');
+  assert.equal((await read()).issue.code, 'LOCK');
+  clearInterval(holder.heartbeat); holder.heartbeat = null;
+  // The holder is this process. A dead other DSH is not in the in-process open set; drop that registration
+  // and leave the frozen owner.lock for the background reclaim.
+  holder.registered = false;
+  globalThis[Symbol.for('dsh-cf.open-stores')].delete(holder.dir);
+  let status;
+  for (let i = 0; i < 80; i++) {
+    status = await read();
+    if (status.issue?.code === 'SETUP') break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  assert.equal(status.autoConnect, true);
+  assert.equal(status.issue?.code, 'SETUP', 'auto-connect runs on the reclaimed controller');
+  assert.notEqual(JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8')).nonce, nonce);
+  const saved = await readFile(join(dir, 'state.json'), 'utf8');
+  await holder.refreshLease();
+  assert.equal(holder.ownershipLost, true);
+  holder.state.gatePort = 999;
+  await assert.rejects(holder.save(), { code: 'LOCK' });
+  assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), saved);
+  await holder.close();
+});
+test('dispose stops lock reclaim before a later attempt can open the profile', async t => {
+  const { Store } = await import('../src/store.js');
+  const live = await mkdtemp(join(tmpdir(), 'dsh-cf-reclaim-stop-')); t.after(() => rm(live, { recursive: true, force: true }));
+  const holder = await new Store(join(live, '.dsh-cf'), { heartbeatMs: 30 }).open(); t.after(() => holder.close());
+  const nonce = holder.lock;
+  const locked = await dshHost(t, { config: { stateDirectory: join(live, '.dsh-cf'), heartbeatMs: 30 } });
+  await locked.dispose();
+  await new Promise(r => setTimeout(r, 400));
+  assert.equal(JSON.parse(await readFile(join(holder.dir, 'owner.lock'), 'utf8')).nonce, nonce);
+  assert.equal(holder.ownershipLost, false);
+});

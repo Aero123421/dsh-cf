@@ -190,6 +190,154 @@ test('an open store keeps its lease alive so a second process would see a heartb
   const path = join(dir, 'owner.lock'); const old = new Date(Date.now() - 60_000); await utimes(path, old, old);
   await new Promise(r => setTimeout(r, 120)); assert((await stat(path)).mtimeMs > Date.now() - 1_000);
 });
+test('recording a connector rewrites owner.lock in place and stays valid JSON', async t => {
+  const dir = await directory(t);
+  const store = await new Store(dir, { heartbeatMs: 20 }).open();
+  t.after(() => store.close());
+  await new Promise(r => setTimeout(r, 50));
+  await store.recordConnector({ pid: 123, start: 456 });
+  const owner = JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8'));
+  assert.deepEqual(owner.connector, { pid: 123, start: 456 });
+  assert.equal(owner.nonce, store.lock);
+  await store.clearConnector();
+  const cleared = JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8'));
+  assert.equal(cleared.connector, undefined);
+  assert.equal(cleared.nonce, store.lock);
+});
+test('two processes reclaiming one stale lock leave a single owner', async t => {
+  const dir = await directory(t);
+  await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: 2147483647, nonce: 'stale', heartbeatMs: 40 }));
+  const worker = join(dir, 'reclaim.mjs');
+  await writeFile(worker, `import { Store } from ${JSON.stringify(new URL('../src/store.js', import.meta.url).href)};
+const dir = process.argv[2];
+try {
+  const store = await new Store(dir, { heartbeatMs: 40 }).open();
+  process.send({ ok: true, nonce: store.lock });
+  await new Promise(resolve => {
+    const timer = setTimeout(resolve, 5000);
+    process.once('message', () => { clearTimeout(timer); resolve(); });
+  });
+  await store.close();
+} catch (error) {
+  process.send({ ok: false, code: error?.code || 'ERR' });
+}
+`);
+  const { fork } = await import('node:child_process');
+  const started = pid => new Promise((resolve, reject) => {
+    const child = fork(worker, [dir], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    child.on('error', () => {});
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('no result from ' + pid)); }, 8000);
+    child.once('message', message => { clearTimeout(timer); resolve({ child, message }); });
+    t.after(() => { if (child.connected) child.send('done', () => {}); try { child.kill('SIGKILL'); } catch { /* already gone */ } });
+  });
+  const [left, right] = await Promise.all([started('a'), started('b')]);
+  const wins = [left, right].filter(item => item.message.ok);
+  assert.equal(wins.length, 1);
+  assert.equal([left, right].find(item => !item.message.ok).message.code, 'LOCK');
+  assert.equal(JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8')).nonce, wins[0].message.nonce);
+  for (const item of wins) { if (item.child.connected) item.child.send('done', () => {}); }
+});
+test('a stopped owner keeps its cloudflared until the new owner kills that exact process, even when gate ports differ', { skip: process.platform !== 'linux' }, async t => {
+  const { readdir } = await import('node:fs/promises');
+  const dir = await directory(t);
+  const binary = join(dir, 'cloudflared');
+  await writeFile(binary, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o700 });
+  const ownerFile = join(dir, 'owner.mjs');
+  await writeFile(ownerFile, `import { Store } from ${JSON.stringify(new URL('../src/store.js', import.meta.url).href)};
+import { readProcessStart } from ${JSON.stringify(new URL('../src/connector.js', import.meta.url).href)};
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
+const dir = process.argv[2], binary = process.argv[3];
+const store = await new Store(dir, { heartbeatMs: 80 }).open();
+const gate = createServer();
+await new Promise((resolve, reject) => { gate.once('error', reject); gate.listen(0, '127.0.0.1', resolve); });
+const child = spawn(binary, [], { stdio: 'ignore' });
+const start = await readProcessStart(child.pid);
+await store.recordConnector({ pid: child.pid, start });
+process.send({ event: 'ready', pid: child.pid, start, port: gate.address().port });
+setInterval(() => {}, 1000);
+`);
+  const { fork } = await import('node:child_process');
+  const owner = fork(ownerFile, [dir, binary], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  t.after(() => { try { owner.kill('SIGKILL'); } catch { /* already gone */ } });
+  const ready = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('owner did not start')), 8000);
+    owner.once('message', message => { clearTimeout(timer); resolve(message); });
+  });
+  owner.kill('SIGSTOP');
+  const samples = [];
+  let scanning = false;
+  const sample = async () => {
+    if (scanning) return;
+    scanning = true;
+    try {
+      const names = await readdir('/proc');
+      let count = 0;
+      for (const name of names) {
+        if (!/^\d+$/.test(name)) continue;
+        const cmd = await readFile(`/proc/${name}/cmdline`, 'utf8').catch(() => '');
+        const args = cmd.split('\0').filter(Boolean);
+        if (args[0] === binary || args[1] === binary) count++;
+      }
+      samples.push(count);
+    } finally { scanning = false; }
+  };
+  const poll = setInterval(() => { void sample(); }, 100);
+  t.after(() => clearInterval(poll));
+  const waiterFile = join(dir, 'waiter.mjs');
+  await writeFile(waiterFile, `import { Store } from ${JSON.stringify(new URL('../src/store.js', import.meta.url).href)};
+import { stopRecordedConnector } from ${JSON.stringify(new URL('../src/connector.js', import.meta.url).href)};
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
+const dir = process.argv[2], binary = process.argv[3];
+const gate = createServer();
+await new Promise((resolve, reject) => { gate.once('error', reject); gate.listen(0, '127.0.0.1', resolve); });
+const store = await new Store(dir, { heartbeatMs: 80 }).open();
+const record = store.inheritedConnector;
+if (!record) throw new Error('missing connector record');
+const gone = await stopRecordedConnector(record);
+const { readFile } = await import('node:fs/promises');
+const status = await readFile('/proc/' + record.pid + '/status', 'utf8').catch(() => '');
+const cmd = await readFile('/proc/' + record.pid + '/cmdline', 'utf8').catch(() => '');
+const zombie = /^State:\s+Z/m.test(status);
+if (cmd.includes('cloudflared') && !zombie) throw new Error('old cloudflared still alive ' + JSON.stringify({ record, zombie, cmd }));
+const child = spawn(binary, [], { stdio: 'ignore' });
+process.send({ event: 'spawned', pid: child.pid, gone, port: gate.address().port });
+setInterval(() => {}, 1000);
+`);
+  const waiter = fork(waiterFile, [dir, binary], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  let waiterLog = '';
+  waiter.stdout?.on('data', chunk => { waiterLog += chunk; });
+  waiter.stderr?.on('data', chunk => { waiterLog += chunk; });
+  t.after(() => { try { waiter.kill('SIGKILL'); } catch { /* already gone */ } });
+  const spawned = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`waiter did not spawn: ${waiterLog.slice(0, 800)}`)), 8000);
+    waiter.once('message', message => { clearTimeout(timer); resolve(message); });
+    waiter.once('exit', code => { clearTimeout(timer); reject(new Error(`waiter exited ${code}: ${waiterLog.slice(0, 800)}`)); });
+  });
+  for (let i = 0; i < 5; i++) { await sample(); await new Promise(r => setTimeout(r, 100)); }
+  clearInterval(poll);
+  assert.equal(spawned.gone, true);
+  assert.notEqual(spawned.port, ready.port);
+  assert.notEqual(spawned.pid, ready.pid);
+  assert(samples.length > 0);
+  assert(samples.every(count => count <= 1), `counts ${samples.join(',')}`);
+  const oldStatus = await readFile(`/proc/${ready.pid}/status`, 'utf8').catch(() => '');
+  if (oldStatus) assert.match(oldStatus, /^State:\s+Z/m, 'a stopped parent leaves a zombie, not a live cloudflared');
+  try { process.kill(spawned.pid, 'SIGKILL'); } catch { /* already gone */ }
+});
+test('a reused pid or a process that is not cloudflared is not killed', { skip: process.platform !== 'linux' }, async t => {
+  const { spawn } = await import('node:child_process');
+  const { stopRecordedConnector, readProcessStart } = await import('../src/connector.js');
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  t.after(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } });
+  const start = await readProcessStart(child.pid);
+  assert.equal(typeof start, 'number');
+  assert.equal(await stopRecordedConnector({ pid: child.pid, start }), true);
+  assert.doesNotThrow(() => process.kill(child.pid, 0));
+  assert.equal(await stopRecordedConnector({ pid: child.pid, start: start + 1 }), true);
+  assert.doesNotThrow(() => process.kill(child.pid, 0));
+});
 test('closing releases in-process ownership so a reloaded plugin can reopen the profile', async t => {
   const dir = await directory(t); const first = await new Store(dir).open(); await first.close();
   const second = await new Store(dir).open(); t.after(() => second.close()); assert.ok(second.state.instanceId);
@@ -306,7 +454,7 @@ for (const scenario of [
   assert.equal(connector.process, null);
   assert(statuses.includes('error'), 'the fixture has exited');
   assert.deepEqual(statuses.slice(0, statuses.indexOf('error')), ['starting', ...scenario.expected]);
-  assert(messages.every(message => Object.keys(message).sort().join(',') === 'status,type' && message.type === 'status'));
+  assert(messages.every(message => message.type === 'connector' ? Object.keys(message).sort().join(',') === 'pid,type' && Number.isSafeInteger(message.pid) : Object.keys(message).sort().join(',') === 'status,type' && message.type === 'status'));
   assert(!JSON.stringify(messages).includes('fixture-secret-never-forward'));
 });
 for (const code of [0, 1]) test(`unexpected connector exit ${code} remains an error through guardian cleanup`, unix, async t => {

@@ -362,6 +362,10 @@ test('a busy saved gate port fails a resume as retryable, and an authorized star
   f.controller.bootResume(); await f.settle();
   let s = f.controller.snapshot(true);
   assert.equal(s.issue.code, 'GATE_PORT_BUSY'); assert.equal(s.status, 'reconnecting'); assert(s.issue.retryAt); assert.equal(f.store.state.gatePort, taken, 'the saved port is not silently replaced');
+  assert.equal(f.connectors.length, 0, 'a failed bind does not start cloudflared');
+  assert.equal(f.controller.retryAttempt, 0, 'a busy saved port does not consume the connector backoff');
+  const gateWait = Date.parse(s.issue.retryAt) - Date.now();
+  assert(gateWait >= 800 && gateWait <= 1_100, `gate retry waited ${gateWait}ms`);
   assert.equal(f.api.data.writes.length, 0);
   await f.act('authorize', { token: TOKEN });
   const ports = []; f.controller.deps.provision = async (_cf, store, setup, port) => { ports.push(port); store.state.setup = setup; store.state.gatePort = port; store.state.owned = { audience: AUD, appId: 'app', tunnelId: 'tunnel', dnsId: 'dns' }; };

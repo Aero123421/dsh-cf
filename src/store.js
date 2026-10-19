@@ -72,6 +72,13 @@ export const fingerprintV2 = async (readId = readMachineId, { platform = process
 const OPEN = globalThis[Symbol.for('dsh-cf.open-stores')] ??= new Set();
 const MAX_ACCEPTED_HOSTS = 8;
 const lockMtime = async path => { try { return (await stat(path)).mtimeMs; } catch { return null; } };
+/** Identity of a cloudflared this profile started. `start` is the OS process start counter, so a reused PID does not match. */
+export function connectorRecord(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (!Number.isSafeInteger(value.pid) || value.pid <= 0) return null;
+  if (!Number.isSafeInteger(value.start) || value.start < 0) return null;
+  return { pid: value.pid, start: value.start };
+}
 export class Store {
   /**
    * @param directory - state directory.
@@ -82,7 +89,11 @@ export class Store {
     this.heartbeatMs = heartbeatMs; this.heartbeat = null; this.heartbeatWork = null; this.ownershipLost = false;
     this.machineId = machineId; this.staleReclaimMs = staleReclaimMs; this.leaseFailureLimit = leaseFailureLimit; this.leaseFailures = 0;
   }
-  async open() {
+  /**
+   * @param wait - when false, an existing owner.lock fails immediately. Plugin startup uses that so DSH's web
+   * server is not held for the stale-lock observation; a later open() observes and reclaims in the background.
+   */
+  async open({ wait = true } = {}) {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     const info = await lstat(this.dir);
     demand(info.isDirectory() && !info.isSymbolicLink(), 'STATE_PATH', 'The state directory must be a real private directory.');
@@ -90,7 +101,7 @@ export class Store {
     await chmod(this.dir, 0o700);
     demand(!OPEN.has(this.dir), 'LOCK', 'This profile state is already open in this DSH process.');
     OPEN.add(this.dir); this.registered = true;
-    try { await this.acquire(); }
+    try { await this.acquire({ wait }); }
     catch (e) { OPEN.delete(this.dir); this.registered = false; throw e; }
     try {
       try { this.state = JSON.parse(await readFile(join(this.dir, 'state.json'), 'utf8')); }
@@ -114,18 +125,25 @@ export class Store {
    * owner.lock is a lease: the owner refreshes its mtime every heartbeat. PID presence or absence proves
    * nothing across PID namespaces, so every existing lock is observed for longer than one heartbeat.
    */
-  async acquire() {
+  async acquire({ wait = true } = {}) {
     const path = join(this.dir, 'owner.lock');
     const take = async () => {
       const lock = await open(path, 'wx', 0o600);
-      this.lock = nonce(); await lock.writeFile(JSON.stringify({ pid: process.pid, nonce: this.lock, heartbeatMs: this.heartbeatMs })); await lock.close();
+      this.lock = nonce();
+      this.inheritedConnector = null;
+      await lock.writeFile(JSON.stringify({ pid: process.pid, nonce: this.lock, heartbeatMs: this.heartbeatMs }));
+      await lock.close();
       this.heartbeat = setInterval(() => {
         if (!this.heartbeatWork) this.heartbeatWork = this.refreshLease().finally(() => { this.heartbeatWork = null; });
       }, this.heartbeatMs);
       this.heartbeat.unref?.();
     };
     try { await take(); return; }
-    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      // Startup must not sit inside the observation. The caller retries with wait:true in the background.
+      if (!wait) throw new CfError('LOCK', 'Another DSH holds this profile. Startup continues and this plugin retries the lease in the background.');
+    }
     // Serialize stale-lock reclamation too, so one reclaimer cannot unlink another's new lock.
     const reclaim = join(this.dir, 'reclaim.lock');
     try { await mkdir(reclaim, { mode: 0o700 }); }
@@ -146,9 +164,34 @@ export class Store {
       demand(before !== null && await lockMtime(path) === before, 'LOCK', `Another DSH (PID ${previous.pid}) is actively using this profile. Use a separate profile for each DSH, or stop the other one.`);
       const current = JSON.parse(await readFile(path, 'utf8'));
       demand(current.nonce === previous.nonce, 'LOCK', 'Profile ownership changed. Retry.');
+      const inherited = connectorRecord(current.connector);
       await unlink(path); await take();
+      // take() clears inheritedConnector. Put back the cloudflared the previous owner recorded.
+      this.inheritedConnector = inherited;
     } finally { await rmdir(reclaim); }
   }
+  /** Rewrite owner.lock on the inode we already own. A mismatched nonce loses ownership and writes nothing. */
+  async writeLock(mutate) {
+    await this.assertOwnership();
+    const path = join(this.dir, 'owner.lock');
+    const handle = await open(path, 'r+');
+    try {
+      const owner = JSON.parse(await handle.readFile('utf8'));
+      if (!this.lock || owner.nonce !== this.lock) { this.loseOwnership(); throw new CfError('LOCK', 'Profile ownership was lost. No state or token was written.'); }
+      const next = JSON.stringify(mutate(owner));
+      // readFile() left the offset at the old end. writeFile() ignores position, so write at 0 after truncate.
+      await handle.truncate(0);
+      await handle.write(next, 0, 'utf8');
+      const now = new Date(); await handle.utimes(now, now);
+    } finally { await handle?.close().catch(() => {}); }
+  }
+  /** cloudflared pid and start time, so the next owner can stop that process after a takeover. Not a lock decision. */
+  recordConnector(connector) {
+    const record = connectorRecord(connector);
+    demand(record, 'LOCK', 'The connector identity is incomplete, so it was not recorded.');
+    return this.writeLock(owner => ({ ...owner, connector: record }));
+  }
+  clearConnector() { return this.writeLock(owner => { const next = { ...owner }; delete next.connector; return next; }); }
   async assertOwnership() {
     let owner, unreadable = false;
     try { owner = JSON.parse(await readFile(join(this.dir, 'owner.lock'), 'utf8')); }

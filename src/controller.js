@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CfError, demand, safeError, pause, timeout } from './common.js';
 import { Cloudflare, provision, removeOwned, refreshTunnelToken, assertSetupChange, inspectPending, resolvePending, PENDING_MODES, blockingPending, invalidatesConfiguration } from './cloudflare.js';
-import { ensureBinary, Connector } from './connector.js';
+import { ensureBinary, Connector, stopRecordedConnector, readProcessStart } from './connector.js';
 import { accessVerifier } from './access.js';
 import { Gate } from './gate.js';
 import manifest from '../package.json' with { type: 'json' };
@@ -44,7 +44,7 @@ export class Controller {
     this.retry = null; this.retryAttempt = 0; this.userGeneration = 0; this.retryDelaysMs = retryDelaysMs; this.retryCapMs = retryCapMs; this.verifiedThisRuntime = false;
     store.onOwnershipLost = async () => {
       try { await this.shutdown(); }
-      finally { this.failure = { code: 'LOCK', message: 'Profile ownership was lost. Publication was stopped. Stop the other DSH before reopening this profile.', action: 'close-other-dsh' }; this.changed(); }
+      finally { this.failure = { code: 'LOCK', message: 'Profile ownership was lost. Publication was stopped. Restart this DSH.', action: 'close-other-dsh' }; this.changed(); }
     };
   }
   changed() { this.seq++; }
@@ -306,7 +306,10 @@ export class Controller {
     const s = this.store.state;
     if (this.disposed || this.stopping || s.paused || s.hostReview || !s.setup || !RETRYABLE.has(error?.code)) return false;
     clearTimeout(this.retry?.timer);
-    const delay = this.retryDelaysMs[this.retryAttempt] ?? this.retryCapMs; this.retryAttempt++;
+    // A busy saved gate port is the previous process still holding it. Retry quickly instead of the long connector backoff.
+    const portBusy = error?.code === 'GATE_PORT_BUSY';
+    const delay = portBusy ? 1_000 : (this.retryDelaysMs[this.retryAttempt] ?? this.retryCapMs);
+    if (!portBusy) this.retryAttempt++;
     const generation = this.userGeneration;
     const retry = { at: Date.now() + delay, error, timer: setTimeout(() => this.runRetry(retry, generation), delay) };
     retry.timer.unref?.();
@@ -388,6 +391,9 @@ export class Controller {
     this.step('authorization', 'done', resume ? 'Saved connector token; management grant not required' : 'Selected Cloudflare resources verified');
     this.step('access', 'working', 'Applying the supported DSH Host trust configuration');
     await this.trustHost(setup.hostname); signal.throwIfAborted();
+    // Takeover already stopped the recorded cloudflared. Bind the saved gate port before any new
+    // cloudflared: resume never moves that port, and a failed bind must not reach Connector.start.
+    await this.releaseInheritedConnector(signal);
     const port = await this.listen(setup, s, resume);
     const gate = this.gate;
     try {
@@ -407,8 +413,14 @@ export class Controller {
       this.step('tunnel', 'working', 'Waiting for cloudflared registration');
       const connector = new this.deps.Connector(status => this.onConnectorStatus(connector, status));
       this.connector = connector; this.connectorStatus = 'starting';
-      try { await connector.start(this.binary.path, join(this.store.dir, 'tunnel.token')); }
-      catch { throw new CfError('CONNECTOR_EXIT', 'cloudflared could not be started. Check the executable and reconnect.'); }
+      await this.store.assertOwnership?.();
+      try {
+        await connector.start(this.binary.path, join(this.store.dir, 'tunnel.token'));
+        await this.rememberConnector(connector);
+      } catch (error) {
+        if (signal.aborted || error?.code === 'LOCK') throw error;
+        throw new CfError('CONNECTOR_EXIT', 'cloudflared could not be started. Check the executable and reconnect.');
+      }
       await this.awaitConnector(connector, signal, 'cloudflared did not establish a connection. Check outbound connectivity and the connector token.');
       this.step('browser', 'working', 'Checking rejection without authentication');
       await this.negativeProbe(setup, signal);
@@ -441,6 +453,22 @@ export class Controller {
     const trusted = await this.adapter.trust(hostname);
     if (trusted?.added) s.trustedHostAdded = trusted.added;
     if (trusted?.added || old) await this.store.save();
+  }
+  /** Stop the cloudflared recorded by the previous owner before this process starts its own. */
+  async releaseInheritedConnector(signal) {
+    const record = this.store.inheritedConnector;
+    if (!record) return;
+    await this.store.assertOwnership?.();
+    const gone = await stopRecordedConnector(record, { signal });
+    if (!gone) throw new CfError('CONNECTOR_EXIT', 'The previous cloudflared is still running, so this DSH did not start another.');
+    this.store.inheritedConnector = null;
+  }
+  async rememberConnector(connector) {
+    const pid = connector?.cloudflaredPid;
+    if (!pid || typeof this.store.recordConnector !== 'function') return;
+    const start = await readProcessStart(pid);
+    if (start == null) return;
+    await this.store.recordConnector({ pid, start });
   }
   /** Binds the loopback gate. A busy saved port is an error on resume (the Tunnel routes to it) and is replaced on an authorized start. */
   async listen(setup, s, resume) {
@@ -567,7 +595,11 @@ export class Controller {
     if (this.connector || !this.binary || !this.gate) return;
     const connector = new this.deps.Connector(status => this.onConnectorStatus(connector, status));
     this.connector = connector; this.connectorStatus = 'starting';
-    try { await connector.start(this.binary.path, join(this.store.dir, 'tunnel.token')); }
+    try {
+      await this.store.assertOwnership?.();
+      await connector.start(this.binary.path, join(this.store.dir, 'tunnel.token'));
+      await this.rememberConnector(connector);
+    }
     catch { throw new CfError('CONNECTOR_EXIT', 'cloudflared could not be started after the token refresh.'); }
     await this.awaitConnector(connector, signal, 'cloudflared did not establish a connection after the token refresh.');
   }
@@ -579,7 +611,7 @@ export class Controller {
     const gate = this.gate; this.gate = null;
     const connector = this.connector; this.connector = null; this.published = false;
     const closing = Promise.resolve().then(async () => {
-      try { await connector?.stop(); } finally { try { await gate?.close(); } finally { this.adapter.invalidate(); } }
+      try { await connector?.stop(); } finally { try { await gate?.close(); } finally { await this.store.clearConnector?.().catch(() => {}); this.adapter.invalidate(); } }
     }).finally(() => { if (this.closingRuntime === closing) this.closingRuntime = null; this.changed(); });
     this.closingRuntime = closing;
     return closing;

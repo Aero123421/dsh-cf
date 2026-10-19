@@ -65,7 +65,7 @@ test('every code the host can report has localized guidance in every language', 
     for (const match of text.matchAll(/['"`]([A-Z][A-Z0-9_]{2,})['"`]/g)) codes.add(match[1]);
   }
   // Public-gate rejections never reach the settings page; the rest are environment names, HTTP verbs and signals.
-  const notForSettings = /^(?:AUTH|AUTH_OWNER|AUTH_UNAVAILABLE|HOST|ORIGIN|PATH|BODY|UPGRADE|CNAME|DELETE|GET|HEAD|POST|PUT|DSH_|EADDRINUSE|EEXIST|ENOENT|ERR_.*|HOME|LOCALAPPDATA|PROGRAMDATA|SYSTEMROOT|TEMP|TMP|TMPDIR|USERPROFILE|WINDIR|RS256|SIGINT|SIGKILL|SIGTERM)$/;
+  const notForSettings = /^(?:AUTH|AUTH_OWNER|AUTH_UNAVAILABLE|HOST|ORIGIN|PATH|BODY|UPGRADE|CNAME|DELETE|GET|HEAD|POST|PUT|DSH_|EADDRINUSE|EEXIST|ENOENT|EPERM|ESRCH|ERR_.*|HOME|LOCALAPPDATA|PROGRAMDATA|SYSTEMROOT|TEMP|TMP|TMPDIR|USERPROFILE|WINDIR|RS256|SIGINT|SIGKILL|SIGTERM)$/;
   const missing = [...codes].filter(code => !notForSettings.test(code) && !plugin.guideKey(code));
   assert.deepEqual(missing, []);
   for (const code of [...codes, 'CF_401', 'CF_403', 'CF_404', 'CF_429', 'CF_500', 'CF_502', 'AbortError', 'TimeoutError']) {

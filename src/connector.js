@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { CfError, demand, boundedJson, timeout } from './common.js';
+import { CfError, demand, boundedJson, timeout, pause } from './common.js';
 
 export const CLOUDFLARED_VERSION = '2026.10.0';
 const PLATFORMS = {
@@ -128,12 +128,51 @@ export async function ensureBinary({ dir, selected = '', allowDownload = false, 
   } finally { await rm(staging, { recursive: true, force: true }); }
 }
 
+/** Linux process start counter from /proc. A reused PID has a different value. */
+export async function readProcessStart(pid) {
+  if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  const text = await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => '');
+  const end = text.lastIndexOf(')');
+  if (end < 0) return null;
+  const start = Number(text.slice(end + 2).split(' ')[19]);
+  return Number.isSafeInteger(start) ? start : null;
+}
+async function commandLine(pid) {
+  return readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
+}
+async function sameCloudflared(record) {
+  if (!record || !Number.isSafeInteger(record.pid) || !Number.isSafeInteger(record.start)) return false;
+  if (await readProcessStart(record.pid) !== record.start) return false;
+  return (await commandLine(record.pid)).includes('cloudflared');
+}
+/**
+ * Stop the cloudflared recorded in owner.lock. A PID is killed only when its start time and command line still
+ * match that cloudflared. Returns true when no such process remains (including when the record does not match).
+ */
+export async function stopRecordedConnector(record, { signal } = {}) {
+  if (!record) return true;
+  if (!(await sameCloudflared(record))) return true;
+  const deadline = Date.now() + 5_000;
+  try { process.kill(record.pid, 'SIGTERM'); } catch (error) { if (error?.code === 'ESRCH') return true; }
+  while (Date.now() < deadline) {
+    if (!(await sameCloudflared(record))) return true;
+    await pause(100, signal);
+  }
+  if (!(await sameCloudflared(record))) return true;
+  try { process.kill(record.pid, 'SIGKILL'); } catch (error) { if (error?.code === 'ESRCH') return true; }
+  const killed = Date.now() + 2_000;
+  while (Date.now() < killed) {
+    if (!(await sameCloudflared(record))) return true;
+    await pause(100, signal);
+  }
+  return !(await sameCloudflared(record));
+}
 /** A guardian kills only its own connector on parent IPC loss, including a crashed DSH host. */
 export class Connector {
-  constructor(onStatus = () => {}) { this.onStatus = onStatus; this.process = null; this.stopping = false; this.failed = false; }
+  constructor(onStatus = () => {}) { this.onStatus = onStatus; this.process = null; this.stopping = false; this.failed = false; this.cloudflaredPid = null; }
   async start(binary, tokenFile) {
     demand(!this.process, 'CONNECTOR_RUNNING', 'A connector is already running.');
-    this.stopping = false; this.failed = false;
+    this.stopping = false; this.failed = false; this.cloudflaredPid = null;
     const child = fork(fileURLToPath(new URL('./guardian.js', import.meta.url)), [], { env: { ...childEnv(), ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }, execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true });
     this.process = child;
     const report = status => {
@@ -141,7 +180,10 @@ export class Connector {
       if (status === 'error' || (status === 'stopped' && !this.stopping)) this.failed = true;
       this.onStatus(this.failed ? 'error' : status);
     };
-    child.on('message', value => { if (value?.type === 'status' && ['starting', 'connected', 'disconnected', 'error', 'stopped'].includes(value.status)) report(value.status); });
+    child.on('message', value => {
+      if (value?.type === 'connector' && Number.isSafeInteger(value.pid) && value.pid > 0) this.cloudflaredPid = value.pid;
+      if (value?.type === 'status' && ['starting', 'connected', 'disconnected', 'error', 'stopped'].includes(value.status)) report(value.status);
+    });
     child.on('error', () => report('error'));
     child.once('exit', () => { if (this.process === child) { report(this.stopping ? 'stopped' : 'error'); this.process = null; } });
     child.send({ type: 'start', binary, tokenFile });

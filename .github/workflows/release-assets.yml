@@ -1,0 +1,37 @@
+name: release-assets
+
+# Builds the npm pack and SHA256SUMS as an Actions artifact.
+# It does not create or publish a GitHub Release. Attach the artifact from a release you create.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag or branch to pack
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: mkdir -p "$RUNNER_TEMP/pack" && npm pack --pack-destination "$RUNNER_TEMP/pack"
+      - run: cd "$RUNNER_TEMP/pack" && sha256sum ./*.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-cf-pack
+          path: |
+            ${{ runner.temp }}/pack/*.tgz
+            ${{ runner.temp }}/pack/SHA256SUMS
+          if-no-files-found: error
