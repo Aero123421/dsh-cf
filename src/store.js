@@ -103,6 +103,7 @@ export class Store {
         && (s.acceptedMachines === undefined || (Array.isArray(s.acceptedMachines) && s.acceptedMachines.every(x => typeof x === 'string')))
         && (s.machineV2 === undefined || (typeof s.machineV2 === 'string' && /^[a-f0-9]{64}$/.test(s.machineV2)))
         && (s.paused === undefined || typeof s.paused === 'boolean')
+        && (s.labels === undefined || (s.labels && typeof s.labels === 'object' && !Array.isArray(s.labels) && ['account', 'idp'].every(k => s.labels[k] === null || (typeof s.labels[k] === 'string' && s.labels[k].length <= 200))))
         && (s.trustedHostAdded === undefined || (s.trustedHostAdded && typeof s.trustedHostAdded.hostname === 'string' && ['array', 'expr'].includes(s.trustedHostAdded.form) && typeof s.trustedHostAdded.created === 'boolean'))
         && (s.setup?.requireWebAuthn === undefined || typeof s.setup.requireWebAuthn === 'boolean'), 'STATE_CORRUPT', 'Unrecognized state format. No automatic migration was attempted.');
       await this.checkHost(s);

@@ -113,7 +113,7 @@ test('the public view has a fixed small shape and the management view the full c
   const text = JSON.stringify(open);
   for (const secret of ['team.cloudflareaccess', 'owner@example.com', 'provider-1', 'tunnel', AUD, '/fixture/cloudflared', 'management-secret', '4567', 'a'.repeat(32)]) assert(!text.includes(secret), secret);
   const full = f.controller.snapshot(true);
-  assert.deepEqual(Object.keys(full).sort(), ['account', 'accounts', 'authorization', 'autoConnect', 'busy', 'canManage', 'connector', 'enrollmentUrl', 'evidence', 'gatePort', 'generation', 'hostReview', 'issue', 'lastConfigurationCheck', 'lastVerifiedAt', 'operation', 'paused', 'pendingWrite', 'progress', 'publicUrl', 'resources', 'sequence', 'setup', 'status', 'trustedHostLeft', 'verified', 'version'].sort());
+  assert.deepEqual(Object.keys(full).sort(), ['account', 'accounts', 'authorization', 'autoConnect', 'busy', 'canManage', 'connector', 'enrollmentUrl', 'evidence', 'gatePort', 'generation', 'hostReview', 'issue', 'labels', 'lastConfigurationCheck', 'lastVerifiedAt', 'operation', 'paused', 'pendingWrite', 'progress', 'publicUrl', 'resources', 'sequence', 'setup', 'status', 'trustedHostLeft', 'verified', 'version'].sort());
   assert.equal(full.canManage, true); assert.deepEqual(full.progress.map(step => step.id), ['environment', 'authorization', 'access', 'tunnel', 'browser', 'dsh']);
   assert.deepEqual(Object.keys(full.connector).sort(), ['binary', 'download', 'status']); assert.equal(full.gatePort, 4567);
   const raw = JSON.stringify(full); assert(!raw.includes(TOKEN)); assert(!raw.includes('fixture-dedicated-token'));
@@ -368,6 +368,19 @@ test('a busy saved gate port fails a resume as retryable, and an authorized star
   await f.act('start', SETUP); await f.settle();
   s = f.controller.snapshot(true);
   assert.equal(s.status, 'online'); assert.notEqual(f.store.state.gatePort, taken); assert.deepEqual(ports, [f.store.state.gatePort]); assert(f.store.state.gatePort > 0);
+});
+
+test('display names saved at setup keep the configured card readable without a token, and deletion drops them', async t => {
+  const f = await fixture(t);
+  await f.act('account', { accountId: SETUP.accountId });
+  await connect(f);
+  assert.deepEqual(f.controller.snapshot(true).labels, { account: 'Personal', idp: 'Email PIN' });
+  await f.act('forget');
+  assert.deepEqual(f.controller.snapshot(true).labels, { account: 'Personal', idp: 'Email PIN' }, 'labels survive forgetting the grant');
+  assert.equal(f.controller.snapshot(false).labels, undefined, 'the public view never carries them');
+  await f.act('authorize', { token: TOKEN });
+  await f.act('remove', { confirmHostname: SETUP.hostname }); await f.settle();
+  assert.equal(f.store.state.labels, undefined); assert.equal(f.controller.snapshot(true).labels, null);
 });
 
 test('moving to a new gate port voids the configuration check until provisioning rewrites the Tunnel route', async t => {

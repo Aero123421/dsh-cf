@@ -79,7 +79,7 @@ macOS x64/arm64、Linux x64/arm64/arm、Windows x64/ia32の取得分岐があり
 
 APIのPOSTがCloudflare側で成功しても応答が失われる場合があります。その際は`pending`を残して停止し、同じPOSTを自動再送しません。Access設定の更新（セッション期間・認証方式）は冪等なPUTなので、`pending`を作らず、失敗後に現在値を読み直して判定します（要求値と一致なら成功、変更前の値なら通常の失敗、それ以外は`ACCESS_CHANGED`）。旧版が残した`session`・`authentication`の`pending`は再開を止めず、次の認可した保存で検証して消えます。
 
-ローカルの設定画面でCloudflareを認可し、**書き込み結果を確認（読み取り専用）** を押すと、インスタンスの識別マーカー・対象ホスト（Accessアプリ・DNS）に完全一致する資源を調べ、記録済みIDとの一致を表示します。この操作は書き込み・取り込み・削除・pendingの解除をせず、保存された`pending.path`も使いません。見つからない結果も、書き込み失敗の断定には使えません。
+ローカルの設定画面でCloudflareを認可し、**結果を確認** を押すと（読み取り専用）、インスタンスの識別マーカー・対象ホスト（Accessアプリ・DNS）に完全一致する資源を調べ、記録済みIDとの一致を表示します。この操作は書き込み・取り込み・削除・pendingの解除をせず、保存された`pending.path`も使いません。見つからない結果も、書き込み失敗の断定には使えません。
 
 そのうえで、ホスト名を再入力して次のいずれかを実行できます（`pending/resolve`、管理接続と有効なAPIトークンが必要）。いずれもクライアントから渡されたIDは使わず、サーバーが読み取り検査をやり直し、元の書き込みは再送しません。
 
@@ -180,7 +180,7 @@ MIT。DeepSeek/Cloudflareの公式製品ではありません。
 dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<tag>'
 ```
 
-入れ替えは`.dsh-cf/`のstate・接続トークン・Cloudflareの専用資源を削除しません。state形式は`version: 1`のまま、任意の項目（`paused`・`machineV2`・`trustedHostAdded`）を読み書きします。DSHを再起動し、ブラウザも再読み込みして新しい設定画面を読み込んでください。DSHのpeer範囲（`>=0.2.1-alpha.2 <0.3.0-0`）はDSH起動時のapp-bootが`semver.satisfies(runtime, range, { includePrerelease: true })`で判定します。`package.json`の`exports`・`dsh.bundle.patch`・`dsh.client`は、旧版が更新時に検証するため変えていません。
+入れ替えは`.dsh-cf/`のstate・接続トークン・Cloudflareの専用資源を削除しません。state形式は`version: 1`のまま、任意の項目（`paused`・`machineV2`・`trustedHostAdded`・`labels`）を読み書きします。`labels`は設定時に選んだアカウントとログイン方法の表示名で、管理用トークンがなくても設定画面に名前を出すためだけに使います。資源の選択には使いません。DSHを再起動し、ブラウザも再読み込みして新しい設定画面を読み込んでください。DSHのpeer範囲（`>=0.2.1-alpha.2 <0.3.0-0`）はDSH起動時のapp-bootが`semver.satisfies(runtime, range, { includePrerelease: true })`で判定します。`package.json`の`exports`・`dsh.bundle.patch`・`dsh.client`は、旧版が更新時に検証するため変えていません。
 
 ## 0.1.0-alpha.7 の検証と運用
 

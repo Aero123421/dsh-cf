@@ -166,7 +166,7 @@ export class Controller {
       publicUrl, enrollmentUrl: s.setup ? `https://${s.setup.teamDomain}/` : this.accountDetails ? `https://${this.accountDetails.teamDomain}/` : null,
       connector: { status: this.connector ? this.connectorStatus : 'stopped', binary: this.binary, download: this.download },
       evidence: { unauthenticatedRejected: !!this.evidence.unauthenticatedRejected, owner: !!this.evidence.owner, http: !!this.evidence.http, api: !!this.evidence.api, websocket: !!this.evidence.websocket },
-      gatePort: s.gatePort ?? 0, trustedHostLeft: this.trustedHostLeft,
+      gatePort: s.gatePort ?? 0, trustedHostLeft: this.trustedHostLeft, labels: s.setup && s.labels ? { ...s.labels } : null,
     };
   }
   hostConfirmed() {
@@ -257,7 +257,7 @@ export class Controller {
             if (await this.adapter.untrust(record) === 'left') this.trustedHostLeft = record.hostname;
             delete s.trustedHostAdded;
           }
-          s.proven = false; s.lastVerifiedAt = null; s.lastConfigurationCheck = null; await this.store.save();
+          s.proven = false; s.lastVerifiedAt = null; s.lastConfigurationCheck = null; delete s.labels; await this.store.save();
           this.failure = null; this.warning = null; this.steps = freshSteps(); this.evidence = {}; this.changed();
         });
       }
@@ -399,6 +399,7 @@ export class Controller {
           if (invalidatesConfiguration(error)) { s.lastConfigurationCheck = null; await this.store.save().catch(() => {}); }
           throw error;
         }
+        s.labels = this.labelsFor(setup);
         s.lastConfigurationCheck = new Date().toISOString(); await this.store.save();
       }
       gate.verify = await this.deps.accessVerifier({ ...setup, audience: s.owned.audience });
@@ -418,6 +419,16 @@ export class Controller {
       this.step('dsh', 'waiting', 'Waiting for real DSH HTTP, API, and WebSocket traffic');
       this.changed(); this.maybeVerified();
     } catch (e) { await this.closeRuntime(); throw e; }
+  }
+  /** Display names for the saved setup, from the lists this grant loaded. They are labels only and never select a resource. */
+  labelsFor(setup) {
+    const name = value => (typeof value === 'string' && value.length > 0 ? value.slice(0, 200) : null);
+    const details = this.accountDetails?.accountId === setup.accountId ? this.accountDetails : null;
+    const previous = this.store.state.labels;
+    return {
+      account: name(this.accountList.find(item => item.id === setup.accountId)?.name) ?? previous?.account ?? null,
+      idp: name(details?.idps?.find(item => item.id === setup.idpId)?.name) ?? previous?.idp ?? null,
+    };
   }
   async trustHost(hostname) {
     const s = this.store.state;
@@ -629,7 +640,7 @@ export class UnavailableController {
     }
     const base = { generation: this.generation, sequence: 0, version: VERSION, canManage: management === true, status: 'error' };
     if (management !== true) return { ...base, issue: { code: this.failure.code, message: this.failure.message }, publicUrl: null, verified: false, lastVerifiedAt: null, autoConnect: false, paused: false };
-    return { ...base, issue: this.failure, busy: false, operation: null, progress: freshSteps(), setup: null, resources: {}, autoConnect: false, paused: false, verified: false, lastVerifiedAt: null, lastConfigurationCheck: null, hostReview: null, pendingWrite: null, authorization: { active: false, until: null }, accounts: [], account: null, publicUrl: null, enrollmentUrl: null, connector: { status: 'stopped', binary: null, download: null }, evidence: { unauthenticatedRejected: false, owner: false, http: false, api: false, websocket: false }, gatePort: 0, trustedHostLeft: null };
+    return { ...base, issue: this.failure, busy: false, operation: null, progress: freshSteps(), setup: null, resources: {}, autoConnect: false, paused: false, verified: false, lastVerifiedAt: null, lastConfigurationCheck: null, hostReview: null, pendingWrite: null, authorization: { active: false, until: null }, accounts: [], account: null, publicUrl: null, enrollmentUrl: null, connector: { status: 'stopped', binary: null, download: null }, evidence: { unauthenticatedRejected: false, owner: false, http: false, api: false, websocket: false }, gatePort: 0, trustedHostLeft: null, labels: null };
   }
   bootResume() { return false; }
   async dispose() {}
