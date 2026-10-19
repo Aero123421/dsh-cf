@@ -16,10 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: distribution contains no addLanguage
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-          ! rg -n "addLanguage" src
+        run: rc=0; grep -rnF addLanguage src || rc=$?; test "$rc" -eq 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
