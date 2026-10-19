@@ -3,7 +3,4 @@
     - id: dsh-cf
       name: dsh-cf
       config:
-        oauthClientId: ''
-        oauthScopes: []
-        oauthCallbackPort: 8789
         cloudflaredPath: ''

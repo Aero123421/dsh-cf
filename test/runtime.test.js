@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, chmod, stat, rm, mkdir, utimes, open } fr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { Store } from '../src/store.js';
+import { Store, fingerprint, fingerprintV2, readMachineId } from '../src/store.js';
 import { connectorToken, tokenSecret } from './helpers.js';
 import { ensureBinary, childEnv, supportedVersion, connectorArgs, Connector, CLOUDFLARED_VERSION, MINIMUM_VERSION } from '../src/connector.js';
 async function directory(t) { const dir = await mkdtemp(join(tmpdir(), 'dsh-cf-test-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; }
@@ -23,20 +23,72 @@ test('a corrupt state is never reset into a fresh public instance', async t => {
   const dir = await directory(t); await writeFile(join(dir, 'state.json'), '{not-json');
   await assert.rejects(new Store(dir).open(), { code: 'STATE_CORRUPT' }); assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), '{not-json');
 });
-test('a changed host identity loads safely: publication stays off until the local operator confirms', async t => {
-  const dir = await directory(t); const store = await new Store(dir).open(); const original = store.state.machine;
-  store.state.machine = 'another-machine'; store.state.autoConnect = true; store.state.setup = { hostname: 'keep.example.com' }; await store.save(); await store.close();
-  const reopened = await new Store(dir).open();
-  assert(reopened.state.hostReview?.at); assert.equal(reopened.state.autoConnect, false); assert.equal(reopened.state.setup.hostname, 'keep.example.com');
-  await reopened.confirmHost(); assert.equal(reopened.state.hostReview, null); assert.equal(reopened.state.machine, original);
+const noMachineId = async () => null;
+test('a changed host identity loads safely: publication stays off, the auto-connect preference is kept, and confirming does not restore anything else', async t => {
+  const dir = await directory(t); const store = await new Store(dir, { machineId: noMachineId }).open(); const original = store.state.machine;
+  store.state.machine = 'another-machine'; store.state.autoConnect = true; store.state.proven = true; store.state.setup = { hostname: 'keep.example.com' }; await store.save(); await store.close();
+  const reopened = await new Store(dir, { machineId: noMachineId }).open();
+  assert(reopened.state.hostReview?.at); assert.equal(reopened.state.autoConnect, true, 'a review no longer persists autoConnect=false'); assert.equal(reopened.state.setup.hostname, 'keep.example.com');
+  await reopened.confirmHost(); assert.equal(reopened.state.hostReview, null); assert.equal(reopened.state.machine, original); assert.equal(reopened.state.autoConnect, true);
   assert(reopened.state.acceptedMachines.includes('another-machine') && reopened.state.acceptedMachines.includes(original));
-  await reopened.close(); const again = await new Store(dir).open(); t.after(() => again.close());
+  await reopened.close(); const again = await new Store(dir, { machineId: noMachineId }).open(); t.after(() => again.close());
   assert.equal(again.state.hostReview, null);
 });
+test('the stable machine identity survives a hostname change, and a legacy state is upgraded to it without a review', async t => {
+  const dir = await directory(t); const id = 'f'.repeat(32);
+  const store = await new Store(dir, { machineId: async () => id }).open();
+  assert.equal(store.state.machineV2, await fingerprintV2(async () => id));
+  // Simulate the hostname-based value drifting (macOS renames the host per network).
+  store.state.machine = 'old-hostname-value'; await store.save(); await store.close();
+  const same = await new Store(dir, { machineId: async () => id }).open();
+  assert.equal(same.state.hostReview, undefined, 'the same machine under another hostname is not a new host'); await same.close();
+  // A state written before the stable identity existed carries only the legacy value of this machine.
+  const raw = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')); delete raw.machineV2; raw.machine = fingerprint();
+  await writeFile(join(dir, 'state.json'), JSON.stringify(raw));
+  const upgraded = await new Store(dir, { machineId: async () => id }).open();
+  assert.equal(upgraded.state.hostReview, undefined); assert.equal(upgraded.state.machineV2, await fingerprintV2(async () => id));
+  await upgraded.close();
+  // A machine with another stable id is another machine, even if its hostname happens to match the saved value.
+  const other = await new Store(dir, { machineId: async () => 'e'.repeat(32) }).open(); t.after(() => other.close());
+  assert(other.state.hostReview?.at);
+  await other.confirmHost(); await other.close();
+  const remembered = await new Store(dir, { machineId: async () => id }).open(); t.after(() => remembered.close());
+  assert(!remembered.state.hostReview, 'both confirmed machines are remembered');
+});
+test('a copied profile on a machine with another stable id requires review; unreadable ids fall back to the hostname value', async t => {
+  const dir = await directory(t);
+  const first = await new Store(dir, { machineId: async () => 'a'.repeat(32) }).open();
+  first.state.machine = 'copied-from-elsewhere'; await first.save(); await first.close();
+  const copy = await new Store(dir, { machineId: async () => 'b'.repeat(32) }).open();
+  assert(copy.state.hostReview?.at); await copy.close();
+  const fallback = await new Store(await directory(t), { machineId: async () => { throw new Error('ioreg failed'); } }).open(); t.after(() => fallback.close());
+  assert.equal(fallback.state.hostReview, undefined); assert.equal(fallback.state.machineV2, undefined);
+});
+test('state validates the new optional fields', async t => {
+  for (const patch of [{ machineV2: 'short' }, { paused: 'yes' }, { trustedHostAdded: { hostname: 'x' } }, { trustedHostAdded: { hostname: 'x', form: 'array', created: 'no' } }]) {
+    const dir = await directory(t), store = await new Store(dir, { machineId: noMachineId }).open();
+    Object.assign(store.state, patch); await store.save(); await store.close();
+    await assert.rejects(new Store(dir).open(), { code: 'STATE_CORRUPT' }, JSON.stringify(patch));
+  }
+  const dir = await directory(t), store = await new Store(dir).open();
+  Object.assign(store.state, { paused: true, trustedHostAdded: { hostname: 'x.example.com', form: 'expr', created: false } }); await store.save(); await store.close();
+  const ok = await new Store(dir).open(); t.after(() => ok.close()); assert.equal(ok.state.paused, true);
+});
+test('on Linux two containers that share one image machine id stay distinct by hostname; macOS ignores hostname drift', async () => {
+  const id = async () => 'c'.repeat(32);
+  assert.notEqual(await fingerprintV2(id, { platform: 'linux', host: 'container-a' }), await fingerprintV2(id, { platform: 'linux', host: 'container-b' }));
+  assert.equal(await fingerprintV2(id, { platform: 'darwin', host: 'MacBook.local' }), await fingerprintV2(id, { platform: 'darwin', host: 'MacBook-2.local' }));
+  assert.equal(await fingerprintV2(id, { platform: 'win32', host: 'PC-1' }), await fingerprintV2(id, { platform: 'win32', host: 'PC-2' }));
+});
+test('the platform machine id is read where it is cheaply available', async () => {
+  const id = await readMachineId();
+  if (process.platform === 'linux') assert(id === null || /^[a-f0-9]{32}$/.test(id));
+  assert(await fingerprintV2() === null || /^[a-f0-9]{64}$/.test(await fingerprintV2()));
+});
 test('a previously confirmed host identity is accepted again without a new review', async t => {
-  const dir = await directory(t); const store = await new Store(dir).open(); const current = store.state.machine;
+  const dir = await directory(t); const store = await new Store(dir, { machineId: noMachineId }).open(); const current = store.state.machine;
   store.state.machine = 'flipped-hostname'; store.state.acceptedMachines = ['flipped-hostname', current]; await store.save(); await store.close();
-  const reopened = await new Store(dir).open(); t.after(() => reopened.close()); assert.equal(reopened.state.hostReview, undefined);
+  const reopened = await new Store(dir, { machineId: noMachineId }).open(); t.after(() => reopened.close()); assert.equal(reopened.state.hostReview, undefined);
 });
 test('a stale lock is reclaimed without stealing a live new lock', async t => {
   const dir = await directory(t); await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: 2147483647, nonce: 'old', heartbeatMs: 50 }));
@@ -81,6 +133,34 @@ test('ownership loss stops lease renewal and refuses persistent state/token writ
   await assert.rejects(store.clearToken(), { code: 'LOCK' });
   assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), original);
   await store.close(); assert.equal(JSON.parse(await readFile(path, 'utf8')).nonce, 'new-owner');
+});
+test('a transient I/O failure of the lease refresh is not an ownership loss, but a replaced or removed lock is, and so are repeated failures', async t => {
+  const dir = await directory(t); const store = await new Store(dir, { heartbeatMs: 10_000, leaseFailureLimit: 3 }).open(); t.after(() => store.close());
+  let lost = 0; store.onOwnershipLost = () => { lost++; };
+  const path = join(dir, 'owner.lock'), good = await readFile(path, 'utf8');
+  await writeFile(path, '{partial'); await store.refreshLease(); await store.refreshLease();
+  assert.equal(store.ownershipLost, false); assert.equal(lost, 0);
+  await writeFile(path, good); await store.refreshLease(); assert.equal(store.leaseFailures, 0, 'a good refresh resets the count');
+  await writeFile(path, '{partial'); for (let i = 0; i < 3; i++) await store.refreshLease();
+  await new Promise(r => setImmediate(r)); assert.equal(store.ownershipLost, true); assert.equal(lost, 1);
+  const gone = await new Store(await directory(t), { heartbeatMs: 10_000 }).open(); t.after(() => gone.close());
+  await rm(join(gone.dir, 'owner.lock')); await gone.refreshLease(); assert.equal(gone.ownershipLost, true);
+});
+test('a state write during a transient lock read failure is refused without declaring ownership lost', async t => {
+  const dir = await directory(t); const store = await new Store(dir, { heartbeatMs: 10_000 }).open(); t.after(() => store.close());
+  const path = join(dir, 'owner.lock'), good = await readFile(path, 'utf8');
+  await writeFile(path, '{partial');
+  await assert.rejects(store.save(), { code: 'LOCK' }); assert.equal(store.ownershipLost, false);
+  await writeFile(path, good); await store.save();
+});
+test('a reclaim.lock directory left by a crash blocks only until it is stale', async t => {
+  const dir = await directory(t); await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: 1, nonce: 'dead', heartbeatMs: 40 }));
+  const reclaim = join(dir, 'reclaim.lock'); await mkdir(reclaim);
+  await assert.rejects(new Store(dir, { heartbeatMs: 40 }).open(), { code: 'LOCK' });
+  const old = new Date(Date.now() - 5 * 60_000); await utimes(reclaim, old, old);
+  const store = await new Store(dir, { heartbeatMs: 40 }).open(); t.after(() => store.close());
+  assert.notEqual(JSON.parse(await readFile(join(dir, 'owner.lock'))).nonce, 'dead');
+  await assert.rejects(stat(reclaim), { code: 'ENOENT' });
 });
 test('changing lock identity during reclamation preserves the replacement owner', async t => {
   const dir = await directory(t), path = join(dir, 'owner.lock');

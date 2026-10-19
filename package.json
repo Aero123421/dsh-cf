@@ -1,6 +1,6 @@
 {
   "name": "dsh-cf",
-  "version": "0.1.0-alpha.7",
+  "version": "0.1.0-alpha.8",
   "description": "Owner-only Cloudflare Access and Tunnel integration for DeepSeek Harness.",
   "type": "module",
   "main": "src/index.js",
@@ -21,8 +21,7 @@
     "node": ">=22.18.0"
   },
   "dependencies": {
-    "jose": "6.2.12",
-    "semver": "7.8.5"
+    "jose": "6.2.12"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
@@ -60,5 +59,8 @@
     "@deepseek-ai/dsh": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "semver": "7.8.5"
   }
 }

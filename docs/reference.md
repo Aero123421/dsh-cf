@@ -19,35 +19,11 @@ CloudflareのUI表記でRead/WriteがRead/Edit等になる場合があります�
 
 Global API Keyは使いません。読み取り検証を省略してWriteだけで構築する動作もしません。権限不足は失敗として表示します。
 
-### OAuthクライアントを準備する
+### 管理用APIトークンの扱い
 
-Cloudflare公式の公開クライアント（`token_endpoint_auth_method: none`、Authorization Code + S256 PKCE）を登録します。Client IDとScope IDは公開設定であり、Client Secretは埋め込みません。
+OAuthは使いません。配布用の公開OAuthクライアントがなく、クライアントシークレットや永続的な更新トークンも持たないためです。Cloudflareの管理操作には、上の権限のAPIトークンを使います。
 
-既定の登録先URI:
-
-```text
-http://127.0.0.1:8789/dsh-cf/oauth/callback
-```
-
-そのURIをCloudflare側で登録・許可できることを確認してください。登録の実機検証は未完了です。Scope IDはCloudflareの登録画面、または公式`/oauth/scopes` APIの値を使います。プラグインは架空のScope IDを生成しません。
-
-DSHのprofile patchの設定例:
-
-```yaml
-- id: dsh-cf
-  config:
-    oauthClientId: YOUR_REGISTERED_PUBLIC_CLIENT_ID
-    oauthScopes:
-      - YOUR_REGISTERED_SCOPE_ID
-    oauthCallbackPort: 8789
-    cloudflaredPath: ''
-```
-
-OAuth Client ID / Scope IDは設定画面から今回の認可用に入力することもできます。作者が一般公開クライアントを配布するには、Cloudflare側の公開設定と発行者ドメイン確認が必要です。リポジトリの作成だけではOAuthアプリは作成されません。
-
-**ヘッドレス環境:** Cloudflareは第三者クライアントのDevice Authorization Grantを提供していません。Ubuntu上のDSHをMacのブラウザから設定する場合、既定のloopback callbackはMacへ戻ります。SSHでcallbackポートを転送するか、認可後に開けなかったcallback URL全体を、元の信頼済みDSH設定画面の回収欄へ貼り付けます。state・PKCE・期限・接続先を照合し、一度だけ交換します。認可コード入りのURLをIssueやチャットへ貼らないでください。
-
-管理用アクセストークンは**メモリ内のみ**です。再起動、期限切れ、ローカルで「忘れる」を実行した後の管理操作には再認可が必要です。通常のTunnel再接続は保存済みの専用connector tokenで動きます。「忘れる」はCloudflare側の認可取消しや全セッション失効ではありません。
+トークンは**メモリ内のみ**で、検証してから1時間で失効します。状態にその失効時刻（`authorization.until`）を載せ、失効したトークンは破棄します。「忘れる」・プラグインの停止・DSH終了でも消えます。新しいトークンの検証中に別のトークンを入力した場合は、新しい方が優先され、取消した要求の遅れた結果は反映されません。管理操作（設定の保存と接続、公開設定の削除、書き込み結果の復旧、接続トークンの再取得）には有効なトークンが必要です。通常のTunnel再接続と自動復旧は、保存済みの専用connector tokenで動き、トークンを使いません。「忘れる」はCloudflare側のトークンの取消しや全セッション失効ではありません。
 
 ## 接続の仕組み
 
@@ -61,6 +37,10 @@ Browser (HTTPS)
 ```
 
 ゲートは`jose`でRS256署名、issuer、audience、有効期限、token type、所有者メールを検証します。ホストの時計が最大30秒遅れていても発行直後のトークンを受け付けますが、有効期限は延長しません。HostとOriginは公開ホストのままDSHへ渡します。`ctx.connection.authenticatedUrl()`で得たDSH起動トークンは**loopbackへの正規Cookie交換だけ**に使います。DSHのCookieはサーバー内部に保持し、ブラウザへのSet-Cookieや状態APIには返しません。
+
+すべての要求はJWTを検証してから転送するため、DSHとのCookie交換は最初の検証済み要求（API・WebSocket・ページのどれでも）で遅延して行います。確認用リンクや有効化の段階はありません。本人確認の証跡（`evidence.owner`）は、JWTの検証とCookie交換の両方が成功した後にだけ記録します。Cookie交換の失敗はログインの失敗ではなくDSH側の問題として502で返し、ログアウトのリンクを出しません。
+
+Accessのチーム鍵（`/cdn-cgi/access/certs`）に届かないとき（タイムアウト・通信失敗）は、ログインし直しを促さず、このPCが確認できないことと再試行を伝える503のページを返します。直前に取得できた鍵は、最後に鍵を引けた時刻から最大24時間、再取得に失敗している間だけ使い、その鍵集合に無かったkidには使いません。別のアカウントでログインした場合は「許可されていません」とAccessのログアウトリンクを表示します。エラーページはライト/ダークの配色に対応します。HTTP要求の同時処理は256、WebSocketは別枠で64までです。
 
 WebSocketも認証済みupgradeだけを通します。アップロード/ダウンロード/SSEはストリーミング転送し、JWT期限または15分の接続上限で閉じます（再認証のため。DSHの画面は自動で再接続することを実機で確認済み）。アップロードは100 MB、DSHの応答待ちは100秒まで（どちらもCloudflareのFree/Proプランの上限に合わせた値）。DSHが401を返しても変更系リクエストを勝手に再送しません。
 
@@ -82,22 +62,34 @@ macOS x64/arm64、Linux x64/arm64/arm、Windows x64/ia32の取得分岐があり
 
 `<active-profile-dir>/.dsh-cf/`に非秘密のstate、専用Tunnel token、任意の管理バイナリを保存します。POSIXはディレクトリ0700、state/token0600。**OSキーチェーン暗号化ではありません。** WindowsはユーザーフォルダのACLも管理してください。同じOSユーザーの悪意あるプロセスや管理者からは保護できません。
 
-- 一時停止: ゲートと専用コネクタを閉じ、Cloudflareの専用リソースは保持。
-- 自動接続: 初回の実通信確認後にチェックを有効化した場合だけ、DSH起動時に再接続。
-- 公開設定の削除: ホスト名の再入力を求め、記録済みのIDと所有マーカーを検証して専用DNS → Tunnel（残っている接続記録を先に消去）→ Accessの順で削除。
+- 一時停止: 専用コネクタを先に止め、次にゲートを閉じます（cloudflaredが閉じた後のポートへ転送しないため）。Cloudflareの専用リソースは保持し、停止したこと（`paused`）をstateへ保存します。自動接続の設定は変えません。保存した一時停止は、再開・接続を押すまでDSH再起動後も有効です。DSHの終了・プラグインの停止・所有権の喪失は一時停止を保存しません。
+- 取消し: 実行中の操作と管理リクエストだけを中断します。アカウントの読み込みなどの副次的なリクエストを取り消しても、動作中の公開は止めません。公開の作り直しに入った操作を取り消した場合は、作りかけの公開を閉じて停止中（`offline`）になります（一時停止は保存しません）。再試行の待機も止めます。
+- 自動接続: 初回の実通信確認後にチェックを有効化した場合だけ、DSH起動時に再接続。一時停止中・ホスト確認待ち・設定確認が未完了・書き込み結果の不明がある場合は行いません。
+- 自動復旧: 起動時の再接続が一時的な原因で失敗したとき、公開中にcloudflaredが予期せず終了したとき、保存済みの接続トークンで`resume`と同じ経路を再試行します（Cloudflareへの書き込みなし）。待ち時間は5・15・30・60・120秒、その後は300秒ごとで、成功するか操作されるまで続きます。再試行する原因は`CONNECTOR_TIMEOUT`・`CONNECTOR_EXIT`（起動失敗を含む）・`EDGE_CHECK`・`DSH_PORT`/`DSH_API`/`DSH_TIMEOUT`/`DSH_CONNECTION`・`GATE_PORT_BUSY`です。`UNPROTECTED`（未認証URLが成功を返した）、`SETUP`、`HOST_REVIEW`、`WRITE_UNKNOWN`、ロック・状態の異常、バイナリ・ダウンロードの異常、`*_CHANGED`（資源の不一致）は再試行せず停止のままです。タイマーはunrefでコントローラーが所有し、一時停止・接続・再開・削除・取消し・破棄で止まり、世代を照合するため古いタイマーが公開を復活させません。認可が必要な「設定を保存して接続」は自動再試行の対象外です。
+- ローカルポート: 保存済みのゲートポートが使用中のとき、再接続は`GATE_PORT_BUSY`で失敗して再試行します。認可した接続では新しいポートを選び、専用Tunnelの転送先を更新します。マーカーで所有を確認したTunnelについて現在の設定と目的の設定を比べ、初回、またはローカルのポートだけが違うときだけPUTし、正確に読み戻します。それ以外の差は`TUNNEL_CHANGED`で拒否します。
+- 公開設定の削除: ホスト名の再入力を求め、記録済みのIDと所有マーカーを検証して専用DNS → Tunnel（残っている接続記録を先に消去）→ Accessの順で削除。自動接続を先にオフにし、一時停止の記録も消します。このプラグインが追加した`trustedHosts`のホスト名があれば、公式configEditorでその分だけを元に戻します（下記）。
 - アンインストール: 先に設定画面から公開設定を削除してから`dsh plugin --profile web remove -w dsh-cf`。共有MFA設定や既存バイナリは残す。
-- ホスト確認: stateには作成したPCの識別値（OS・ホスト名・ホームディレクトリから算出）を記録します。macOSのネットワーク変更やコンテナの再作成などで値が変わると、プラグインは読み込みますが、**接続と自動接続を止めて「このPCで使い続ける」の確認を求めます**。別PCへコピーした設定を同時に動かすと同じTunnelに2台がつながるためです。確認したホストは記憶され、次からは確認不要です。削除操作は確認前でも行えます。
-- プロファイルのロック: 同じprofileを2つのDSHで同時に使えないよう`owner.lock`を置き、使用中のDSHは数秒ごとに更新します。DSHが異常終了して残ったロックは、更新が止まっていることを確認してから次回起動時に自動で回収します。別コンテナではPIDの存在・一致・不在だけで所有者の生死は判断できないため、すべての既存ロックを数秒観測します。更新が続いているロックは拒否します。所有権の喪失を検出したDSHは、自分の公開接続を停止してstate/tokenの書き込みを止めます。
+- ホスト確認: stateには作成したPCの識別値を記録します。以前の版はOS・ホスト名・ホームディレクトリから算出しており、macOSのネットワーク変更で変わります。この版はOSの機械ID（Linuxの`/etc/machine-id`または`/var/lib/dbus/machine-id`、macOSの`ioreg`の`IOPlatformUUID`、Windowsの`reg query`の`MachineGuid`）から導いた値を併用します。旧版の値がこのPCのものと一致する状態は、確認なしで機械IDへ移行します。機械IDを読めないPCは従来のホスト名由来の値で判定します。値が異なると、プラグインは読み込みますが、**接続（起動時の自動接続・開始・再開・自動再試行）を止めて「このPCで使い続ける」の確認を求めます**。このとき自動接続の設定は変えません。確認すると、自動接続がオンで一時停止していなければ自動で再開します。別PCへコピーした設定を同時に動かすと同じTunnelに2台がつながるためです。確認したホストは記憶され、次からは確認不要です。削除操作は確認前でも行えます。仮想マシンのイメージを複製すると機械IDも複製されるため、この確認では見分けられません。
+- プロファイルのロック: 同じprofileを2つのDSHで同時に使えないよう`owner.lock`を置き、使用中のDSHは数秒ごとに更新します。DSHが異常終了して残ったロックは、更新が止まっていることを確認してから次回起動時に自動で回収します。別コンテナではPIDの存在・一致・不在だけで所有者の生死は判断できないため、すべての既存ロックを数秒観測します。更新が続いているロックは拒否します。所有権の喪失は、ロックが読めて別のnonceになっている、ロックが消えている、または更新の失敗が連続したときだけ判定し、一時的なI/Oエラー1回では判定しません。喪失を検出したDSHは、自分の公開接続を停止してstate/tokenの書き込みを止めます。クラッシュで残った`reclaim.lock`ディレクトリは約2分で古いと見なして削除します。
+- stateを開けない場合（`LOCK`・`STATE_CORRUPT`・`STATE_PATH`）: プラグインの読み込みは失敗させず、設定用の通信だけを登録します。状態は`error`で、原因と対処を表示し、stateへは何も書かず、すべての操作を拒否します。
 
-削除時もDSHの既存設定を推測して巻き戻しません。プラグインが追加した`trustedHosts`のホスト名が不要になった場合は、DSH設定でその1件だけを外してください。Hostの信頼設定自体は本人認証を解除するものではありません。
+`trustedHosts`は、プラグインが公式configEditorで実際に追加したときだけ、その内容（配列の1件、または自作の式ラッパー）をstateに記録します。公開設定の削除が成功した後、その分だけを元に戻します。配列ならそのホスト名の1件だけを外し、プラグインが配列ごと作った場合で空になるときはキーも消します。`!!js`式は、記録した形のラッパーと完全に一致するときだけ元の式へ戻します。configEditorが拒否した場合や形が変わっている場合は何も変えず、状態の`trustedHostLeft`にホスト名を載せるので、DSHの設定から手動で外してください。最初から信頼済みだったホストや、ユーザーが追加したものは戻しません。Hostの信頼設定自体は本人認証を解除するものではありません。
 
 ### 不明な書き込みの復旧
 
-ローカルの設定画面でCloudflareを認可し、**書き込み結果を確認（読み取り専用）** を押すと、インスタンスの識別マーカー・対象ホスト・記録済みIDに一致する資源を調べます。専用Accessアプリ・Tunnel・DNSのIDと照合結果だけを表示し、作成の再送、資源の取り込み・削除、pendingの解除は行いません。見つからない結果も、書き込み失敗の断定には使えません。表示した結果と次の手順を照合してください。
+APIのPOSTがCloudflare側で成功しても応答が失われる場合があります。その際は`pending`を残して停止し、同じPOSTを自動再送しません。Access設定の更新（セッション期間・認証方式）は冪等なPUTなので、`pending`を作らず、失敗後に現在値を読み直して判定します（要求値と一致なら成功、変更前の値なら通常の失敗、それ以外は`ACCESS_CHANGED`）。変更が反映された後に読み戻しだけ失敗した場合も、同じ認証方式を明示して再試行すると、所有権・audience・IdP・所有者ポリシーを再検証して反映済みと判断します。旧版が残した`session`・`authentication`の`pending`は再開を止めず、次の認可した保存で検証して消えます。
 
-APIのPOSTがCloudflare側で成功しても応答が失われる場合があります。その際は`pending`を残して停止し、同じPOSTを自動再送しません。
+ローカルの設定画面でCloudflareを認可し、**結果を確認** を押すと（読み取り専用）、インスタンスの識別マーカー・対象ホスト（Accessアプリ・DNS）に完全一致する資源を調べ、記録済みIDとの一致を表示します。この操作は書き込み・取り込み・削除・pendingの解除をせず、保存された`pending.path`も使いません。見つからない結果も、書き込み失敗の断定には使えません。
 
-DSHを停止し、stateとtokenを非公開にバックアップして、state内の`pending.kind/path/marker`を確認してください。Cloudflareでその**インスタンスのUUIDマーカー・対象ホスト・記録されたID**だけを確認します。成功済みリソースが記録IDと一致するか、未記録の同一作成リソースを確認して削除したか、そもそも作成されなかったことを確かめた後で、ローカルstateの`pending`を`null`へ戻して再開します。無関係のリソースを名前の類似だけで削除/取り込みしないでください。判断できない場合は停止したまま調査してください。
+そのうえで、ホスト名を再入力して次のいずれかを実行できます（`pending/resolve`、管理接続と有効なAPIトークンが必要）。いずれもクライアントから渡されたIDは使わず、サーバーが読み取り検査をやり直し、元の書き込みは再送しません。
+
+| 操作 | 実行できる条件と動作 |
+|---|---|
+| 記録済みと一致したので解除（`clear-recorded`） | 完全一致した資源がすべて、このインスタンスが既に記録したIDのとき、`pending`だけを消す。 |
+| 未記録の同一マーカー資源を削除（`delete-unrecorded`） | マーカー（`dsh-cf-<instanceId>`）に完全一致し、記録済みIDではない資源だけを、個別に読み直してマーカーを再確認してから削除し、`pending`を消す。Access: 名前とドメイン、Tunnel: 名前で削除済みでない（先に接続記録を消去）、DNS: 名前・コメント・CNAME。記録済みIDは削除せず、何も取り込まない。 |
+| 見つからないので解除（`clear-not-found`） | 検査で一致が0件のときだけ`pending`を消す。ユーザーの確認が安全装置です。**残るリスク:** 検査の後にCloudflareが書き込みを完了すると、記録されない資源が残り得ます。ダッシュボードで同じマーカーの資源が無いか確認してください。 |
+
+判断できない場合は`pending`を残したまま調査してください。無関係のリソースを名前の類似だけで削除/取り込みしないでください。
 
 ## 検証
 
@@ -108,7 +100,7 @@ npm run check
 npm run test:live -- https://mac.example.com/ your-team.cloudflareaccess.com
 ```
 
-ロックファイルは公式jose `v6.2.12`のimmutable release tarballと公開SHA-256に固定しています。npm/DSH側で依存をインストールしてからテストしてください。
+ロックファイルは公式jose `v6.2.12`（実行時の依存はこれだけ）と、開発用の`semver` `v7.8.5`のimmutable release tarballと公開SHA-256に固定しています。`semver`は`check:dsh`・`check:dsh:smoke`がapp-bootと同じ判定をするためだけに使い、配布物のsrcは読み込みません。npm/DSH側で依存をインストールしてからテストしてください。
 
 ```sh
 # 実際のcloudflaredが接続用の引数をそのまま受け付けるかも確認する（任意・ネットワーク不要）
@@ -120,6 +112,8 @@ DSH_CF_OFFLINE_TEST=1 npm run check
 # 公開中の DSH alpha が peer 範囲に入るか。npm registry と app-boot の tarball を読む。
 npm run check:dsh
 ```
+
+以下の0.1.0-alpha.2〜alpha.7の記録は、その版に対するものです。OAuthとプラグイン内更新は後の版で削除したため、現在の機能の検証記録ではありません。現在の版の検証は末尾の「現在の版の検証」にあります。
 
 ### 自動テスト（0.1.0-alpha.2、Linux x64・Node 22.22）
 
@@ -171,7 +165,6 @@ Quick Tunnel、ドメイン不要のworkers.dev中継、統合デバイス一覧
 
 - [DSH公開プロキシ仕様](https://github.com/deepseek-ai/deepseek-harness/blob/d743267388641bc76f17c45ce8b4c231aed1d32c/docs/user/guide/public-deployments.md)
 - [DSH configEditor実装](https://github.com/deepseek-ai/deepseek-harness/blob/d743267388641bc76f17c45ce8b4c231aed1d32c/packages/boot/config-editor/src/index.ts)
-- [Cloudflare OAuthクライアント](https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/)
 - [Access Independent MFA](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/independent-mfa/)
 - [Access JWT検証](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/)
 - [cloudflared実行パラメーター](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/)
@@ -181,22 +174,13 @@ MIT。DeepSeek/Cloudflareの公式製品ではありません。
 
 ## プラグインの更新
 
-「設定 → Cloudflare」の「プラグインの更新」で、実行版・導入版と更新先を確認できます。alpha版では最初にプレリリースを選びます。安定版とプレリリースを混ぜず、選択した更新先のGitHubリリース一覧を確認します。確認しただけでは導入しません。
+このプラグインには更新機能がありません。DSHの **設定 → プラグイン** か、次のコマンドで新しい公開タグを入れ替えます。更新確認・導入・再起動待ちはDSHのplugin managerが扱います。
 
-「プラグインを更新する」は、確認したリリースの明示タグをDSHのプラグイン管理へ渡します。現在のGitHub配布経路と版固定、bundleのON/OFFを維持します。ソースのJSから導入するため、Release assetやインストール時のビルドは不要です。ローカルの開発ディレクトリ・tgz・npm等から導入した場合や、画面から変更できない環境では、元の配布元から手動更新してください。
+```sh
+dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<tag>'
+```
 
-更新候補のpackage名・版・JS entry・bundle宣言とDSH対応範囲を確認し、導入済みの版を下げません。DSHの起動時は、公開されている app-boot の `evaluatePluginCompatibility` が `semver.satisfies(runtime, range, { includePrerelease: true })` でこのプラグインの peer を見ます。そのため `>=0.2.1-alpha.2 <0.3.0-0` は `0.2.1-alpha.2` と `0.2.1-alpha.3` で読み込まれます。更新画面の判定はそれより狭く、各候補は`engines.dsh`があればそれを優先し、なければDSHのpeerDependenciesを検査します。旧版の更新画面との接続を維持するため、この版ではDSHのpeer宣言も残します。対応範囲全体が `>=0.2.1-alpha.2 <0.3.0-0` の内側にあり、下限と上限の両方を持つ必要があります。`*`、`x`、`>=0`、`workspace:`、`<99`、`^0`、`<=9.9.9`、下限のない `<0.3.0-0`、`>=0.2.1-alpha.2 <0.3.0`、`0.2.x` は導入しません。`^0.2.1-alpha.2`、`~0.2.1-alpha.2`、`>=0.2.1-alpha.2 <0.3.0-0` は、実行中の版がその範囲に入るとき導入します。`~0.2.1` は `0.2.1-alpha.3` を含みません。空白や解釈できない範囲も導入しません。
-
-導入は確認したタグの `github:Aero123421/dsh-cf#<tag>` を DSH の `installBundle` に渡します。DSH `0.2.1-alpha.3` で HMR が有効なとき、保存済みの依存指定と文字列が一致する spec は `already-installed` で拒否され、profile は変更されません。そのときは同じタグの `git+https://github.com/Aero123421/dsh-cf.git#<tag>` で同じ導入をやり直します。保存済みの文字列と違うため、pnpm は実行されます。`0.2.1-alpha.2` では最初の `installBundle` が、入っているパッケージの上から導入します。
-
-DSH のプラグイン設定にある公式の更新は、プラグイン管理画面が `removeBundle` のあと `installBundle` します。管理画面は削除する対象とは別のプラグインなので、削除のあとも処理を続けられます。この画面から自分自身を `removeBundle` すると、HMR の再読込でこのプラグインが止まり、続く導入が実行されません。そのためここでは削除しません。両方の指定が `already-installed` のまま導入版が候補より古いときは失敗を表示し、DSH のプラグイン設定か手動の同じタグでの導入を案内します。
-
-`0.1.0-alpha.4` の更新確認は、peer を完全一致の版番号として読みます。範囲を書いたリリースは、その版の画面からは導入できません。DSH のプラグイン設定か `dsh plugin` で一度入れてください。
-
-更新はcloudflaredの取得・更新やTunnel/DNS/Accessの変更とは別の操作です。保存済みの所有IDや接続設定を作り直しません。公開Tunnelから更新操作はできず、元のローカル管理接続を使用します。再起動が必要でCloudflare API tokenを入力済みの場合は、メモリー内のtokenの再入力が必要になることを表示します。
-
-接続が切れても同じ導入を再送せず、操作ID・導入版・実行版を照合します。取得できない結果は「結果が不明」と表示し、新しい候補の導入より先に元の操作を確認します。機密情報を含まない操作ID・候補版・結果だけをprofileの`.dsh-cf-updates`へ保存します。ブラウザ側の操作IDと更新先は、Hostが返したprofile固有の識別子で分けて保存します。
-
+入れ替えは`.dsh-cf/`のstate・接続トークン・Cloudflareの専用資源を削除しません。state形式は`version: 1`のまま、任意の項目（`paused`・`machineV2`・`trustedHostAdded`・`labels`）を読み書きします。`labels`は設定時に選んだアカウントとログイン方法の表示名で、管理用トークンがなくても設定画面に名前を出すためだけに使います。資源の選択には使いません。DSHを再起動し、ブラウザも再読み込みして新しい設定画面を読み込んでください。DSHのpeer範囲（`>=0.2.1-alpha.2 <0.3.0-0`）はDSH起動時のapp-bootが`semver.satisfies(runtime, range, { includePrerelease: true })`で判定します。`package.json`の`exports`・`dsh.bundle.patch`・`dsh.client`は、旧版が更新時に検証するため変えていません。
 
 ## 0.1.0-alpha.7 の検証と運用
 
@@ -208,4 +192,16 @@ DSH 0.2.1-alpha.2 / 0.2.1-alpha.5 / 0.2.1-rc.2で上記smokeを確認しまし�
 
 設定変更は入力・既存構成との一致・DSH・実行ファイルを先に検証します。この段階の拒否では、動作中の接続と前回の構成確認記録を保持します。実際の設定反映に入ってからの失敗は、従来どおり公開を停止して確認を求めます。
 
-更新欄は完了した結果のファイルを繰り返し保存しません。更新処理中・結果不明・再起動待ちを監視し、非表示タブでは監視頻度を下げます。
+## PR #25 作成時の検証記録
+
+Linux x64・Node.js 22.22で`npm ci`後の`npm run check`を実行し、**242件中240件成功、失敗0、スキップ2**でした。スキップは、任意の実cloudflaredテスト（`DSH_CF_CLOUDFLARED`未指定）と、IPv6のないこのホストで`::1`を待ち受けられないために飛ばしたloopbackテストです。JOSEの実RSA署名検証、HTTP/WebSocketの実loopbackソケット、上流を模したDSH、取消し・所有権・保存・POST非再送の各経路を含みます。Cloudflare APIと外部エッジはテスト用の応答です。追加分は、公開用の簡易状態と`canManage`、ブラウザなしで`online`になること、一時停止の保存、取消しと一時停止の違い、自動復旧の待ち時間と取消し、書き込み結果の復旧3操作、冪等なPUTが`pending`を作らないこと、ポート移動、機械ID、リース、`reclaim.lock`、チーム鍵の障害とフォールバック、`trustedHosts`の巻き戻しです。
+
+`npm run check:dsh`は公開app-bootの`0.2.1-alpha.2`・`alpha.3`・`alpha.5`・`rc.2`で対応範囲の判定を確認し、`npm run check:dsh:smoke`は`DSH_CF_DSH_ROOT`で既存の`0.2.1-rc.2`を指定して通りました。
+
+実DSH `0.2.1-rc.2`（Linux、webプロファイル）と、Cloudflare APIとエッジを模したモック、cloudflaredの代役を使い、手動で次を確認しました。公開設定の作成直後（ブラウザ未接続）に`online`、最初のオーナー訪問でHTTP/API/WebSocketが記録されて確認済み、cloudflaredのクラッシュからの自動復旧（5秒・15秒の待機の後に復帰）、自動接続オンでの一時停止がDSH再起動後も維持されること、再開後の再起動で自動接続が復帰すること、公開設定の削除で`!!js`の`trustedHosts`をconfigEditorが元に戻し、再接続で再び追加できること。実Cloudflareアカウント・実IdP・macOS/Windows・Safari/iPadOSでの検証は含みません。
+
+## v0.1.0-alpha.8 公開前レビュー
+
+Linux x64・Node.js 24.19.0で検証しました。追加認証の変更後に読み戻しだけ失敗した場合の再試行と、再開の保存処理中の取消し・一時停止の競合を再現し、修正しています。
+
+検証結果と未検証の範囲は[リリースノート](releases/v0.1.0-alpha.8.md)を参照してください。上の手動確認はPR作成時の記録で、このレビューで再実行したものではありません。

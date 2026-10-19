@@ -1,4 +1,5 @@
 import { open, readFile, mkdir, rename, unlink, lstat, chmod, rmdir, realpath, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { hostname as machineName, homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -40,7 +41,33 @@ export async function privateWrite(path, bytes, beforeCommit = () => {}) {
   try { await beforeCommit(); await rename(temp, path); await chmod(path, 0o600); }
   finally { await unlink(temp).catch(() => {}); }
 }
+/** Hostname-based identity written by every earlier version. It changes whenever the OS hostname does. */
 export const fingerprint = () => digest(`${process.platform}\0${machineName()}\0${homedir()}`);
+const run = (file, args) => new Promise(resolve => {
+  try { execFile(file, args, { timeout: 3000, windowsHide: true, maxBuffer: 64 * 1024 }, (error, stdout) => resolve(error ? '' : String(stdout))); }
+  catch { resolve(''); }
+});
+/** The OS's own stable machine identifier, or null where none can be read cheaply. */
+export async function readMachineId() {
+  if (process.platform === 'linux') {
+    for (const path of ['/etc/machine-id', '/var/lib/dbus/machine-id']) {
+      const value = (await readFile(path, 'utf8').catch(() => '')).trim().toLowerCase();
+      if (/^[a-f0-9]{32}$/.test(value)) return value;
+    }
+    return null;
+  }
+  if (process.platform === 'darwin') return /"IOPlatformUUID"\s*=\s*"([0-9A-Fa-f-]{36})"/.exec(await run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice']))?.[1]?.toLowerCase() ?? null;
+  if (process.platform === 'win32') return /MachineGuid\s+REG_SZ\s+([0-9A-Fa-f-]{36})/.exec(await run('reg', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid']))?.[1]?.toLowerCase() ?? null;
+  return null;
+}
+/**
+ * Version 2 identity: derived from the machine id so renaming the host (macOS does this per network) is not a new host.
+ * Containers built from one Linux image often share /etc/machine-id, so on Linux the hostname still separates them.
+ */
+export const fingerprintV2 = async (readId = readMachineId, { platform = process.platform, host = machineName() } = {}) => {
+  const id = await readId().catch(() => null);
+  return id ? digest(`dsh-cf.machine.v2\0${platform}\0${id}${platform === 'linux' ? `\0${host}` : ''}`) : null;
+};
 // Canonical state directories opened by this process, shared across hot-reloaded copies of the module.
 const OPEN = globalThis[Symbol.for('dsh-cf.open-stores')] ??= new Set();
 const MAX_ACCEPTED_HOSTS = 8;
@@ -50,9 +77,10 @@ export class Store {
    * @param directory - state directory.
    * @param options.heartbeatMs - how often the owner refreshes owner.lock's mtime (its lease heartbeat).
    */
-  constructor(directory, { heartbeatMs = 5_000 } = {}) {
+  constructor(directory, { heartbeatMs = 5_000, machineId = readMachineId, staleReclaimMs = 120_000, leaseFailureLimit = 3 } = {}) {
     this.dir = resolve(directory); this.queue = Promise.resolve(); this.lock = null; this.registered = false;
     this.heartbeatMs = heartbeatMs; this.heartbeat = null; this.heartbeatWork = null; this.ownershipLost = false;
+    this.machineId = machineId; this.staleReclaimMs = staleReclaimMs; this.leaseFailureLimit = leaseFailureLimit; this.leaseFailures = 0;
   }
   async open() {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -73,14 +101,12 @@ export class Store {
       const s = this.state;
       demand(s.version === 1 && /^[a-f0-9-]{36}$/.test(s.instanceId) && s.owned && typeof s.owned === 'object' && typeof s.machine === 'string'
         && (s.acceptedMachines === undefined || (Array.isArray(s.acceptedMachines) && s.acceptedMachines.every(x => typeof x === 'string')))
+        && (s.machineV2 === undefined || (typeof s.machineV2 === 'string' && /^[a-f0-9]{64}$/.test(s.machineV2)))
+        && (s.paused === undefined || typeof s.paused === 'boolean')
+        && (s.labels === undefined || (s.labels && typeof s.labels === 'object' && !Array.isArray(s.labels) && ['account', 'idp'].every(k => s.labels[k] === null || (typeof s.labels[k] === 'string' && s.labels[k].length <= 200))))
+        && (s.trustedHostAdded === undefined || (s.trustedHostAdded && typeof s.trustedHostAdded.hostname === 'string' && ['array', 'expr'].includes(s.trustedHostAdded.form) && typeof s.trustedHostAdded.created === 'boolean'))
         && (s.setup?.requireWebAuthn === undefined || typeof s.setup.requireWebAuthn === 'boolean'), 'STATE_CORRUPT', 'Unrecognized state format. No automatic migration was attempted.');
-      if (!this.acceptedHosts().includes(fingerprint())) {
-        // Hostnames drift (macOS network changes, re-created containers), but a copied profile must never
-        // silently run a second connector for the same Tunnel. Load, keep publication off, and require the
-        // local operator to confirm this host before connecting. Removal stays available.
-        s.hostReview ??= { at: new Date().toISOString() };
-        s.autoConnect = false;
-      }
+      await this.checkHost(s);
       await this.save(); return this;
     } catch (e) { await this.close(); throw e; }
   }
@@ -103,7 +129,14 @@ export class Store {
     // Serialize stale-lock reclamation too, so one reclaimer cannot unlink another's new lock.
     const reclaim = join(this.dir, 'reclaim.lock');
     try { await mkdir(reclaim, { mode: 0o700 }); }
-    catch { throw new CfError('LOCK', 'Profile ownership is being recovered. Retry, or remove reclaim.lock in the state directory while DSH is stopped.'); }
+    catch {
+      // A crash during recovery leaves this directory behind. Recovery takes seconds, so an old one is stale.
+      const age = Date.now() - (await lockMtime(reclaim) ?? Date.now());
+      if (age < this.staleReclaimMs) throw new CfError('LOCK', 'Profile ownership is being recovered. Retry in a minute.');
+      await rmdir(reclaim).catch(() => {});
+      try { await mkdir(reclaim, { mode: 0o700 }); }
+      catch { throw new CfError('LOCK', 'Profile ownership is being recovered. Retry in a minute.'); }
+    }
     try {
       let previous; try { previous = JSON.parse(await readFile(path, 'utf8')); } catch { throw new CfError('LOCK', 'An unreadable lock exists. Inspect owner.lock locally before removing it.'); }
       demand(Number.isSafeInteger(previous.pid) && previous.pid > 0, 'LOCK', 'Invalid owner.lock; inspect it locally.');
@@ -117,8 +150,10 @@ export class Store {
     } finally { await rmdir(reclaim); }
   }
   async assertOwnership() {
-    let owner;
-    try { owner = JSON.parse(await readFile(join(this.dir, 'owner.lock'), 'utf8')); } catch {}
+    let owner, unreadable = false;
+    try { owner = JSON.parse(await readFile(join(this.dir, 'owner.lock'), 'utf8')); }
+    catch (e) { if (e.code !== 'ENOENT') unreadable = true; }
+    if (unreadable && this.lock && !this.ownershipLost) throw new CfError('LOCK', 'The profile lock could not be read just now, so nothing was written. Retry.');
     if (!this.lock || this.ownershipLost || owner?.nonce !== this.lock) {
       this.loseOwnership();
       throw new CfError('LOCK', 'Profile ownership was lost. No state or token was written.');
@@ -130,23 +165,43 @@ export class Store {
     // The host shuts down only this store's gate/connector; never touch the new owner's lock.
     void Promise.resolve().then(() => this.onOwnershipLost?.()).catch(() => {});
   }
+  /**
+   * Ownership is lost when the lock is readable and carries another nonce, when it is gone, or after several
+   * consecutive failures to refresh it. One transient I/O error (a busy disk, a brief sleep) is not a loss.
+   */
   async refreshLease() {
     let handle;
     try {
       handle = await open(join(this.dir, 'owner.lock'), 'r+');
       const owner = JSON.parse(await handle.readFile('utf8'));
-      demand(this.lock && owner.nonce === this.lock, 'LOCK', 'Profile ownership changed.');
+      if (!this.lock || owner.nonce !== this.lock) return this.loseOwnership();
       // Refresh the checked inode, not a pathname that may now belong to a new owner.
       const now = new Date(); await handle.utimes(now, now);
-    } catch { this.loseOwnership(); }
-    finally { await handle?.close().catch(() => {}); }
+      this.leaseFailures = 0;
+    } catch (error) {
+      if (error?.code === 'ENOENT' || ++this.leaseFailures >= this.leaseFailureLimit) this.loseOwnership();
+    } finally { await handle?.close().catch(() => {}); }
   }
-  acceptedHosts() { return [...new Set([this.state.machine, ...(this.state.acceptedMachines ?? [])])]; }
+  /** Host identities the operator accepted: the hostname-based values and the stable machine ids. */
+  acceptedHosts() { return [...new Set([this.state.machine, this.state.machineV2, ...(this.state.acceptedMachines ?? [])].filter(Boolean))]; }
+  /**
+   * A copied profile must never silently run a second connector for the same Tunnel. Load, keep publication off
+   * (the auto-connect preference is kept) and require the local operator to confirm. Removal stays available.
+   * The stable machine id is authoritative once the profile is bound to one; the hostname-based value only
+   * applies to a profile that was never bound (older versions) or on a machine whose id cannot be read.
+   */
+  async checkHost(s) {
+    const stable = await fingerprintV2(this.machineId), accepted = this.acceptedHosts();
+    if (stable && accepted.includes(stable)) return;
+    if (accepted.includes(fingerprint()) && (!stable || !s.machineV2)) { if (stable) s.machineV2 = stable; return; }
+    s.hostReview ??= { at: new Date().toISOString() };
+  }
   /** Explicit local confirmation that this host is the only DSH using this profile's Tunnel. */
   async confirmHost() {
-    const current = fingerprint();
-    this.state.acceptedMachines = [...this.acceptedHosts().filter(x => x !== current), current].slice(-MAX_ACCEPTED_HOSTS);
+    const current = fingerprint(), stable = await fingerprintV2(this.machineId);
+    this.state.acceptedMachines = [...this.acceptedHosts().filter(x => x !== current && x !== stable), current, ...(stable ? [stable] : [])].slice(-MAX_ACCEPTED_HOSTS);
     this.state.machine = current; this.state.hostReview = null;
+    if (stable) this.state.machineV2 = stable;
     await this.save();
   }
   save() {

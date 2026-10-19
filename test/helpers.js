@@ -25,7 +25,7 @@ export function http(port, { path = '/', method = 'GET', headers = {}, body } = 
     }); req.on('error', reject); req.end(body);
   });
 }
-export async function dshFixture({ host = '127.0.0.1' } = {}) {
+export async function dshFixture({ host = '127.0.0.1', trustedHosts = ['keep.example.com'] } = {}) {
   const calls = [], sockets = new Set(), trusted = new Set();
   let launch = 'process-secret-one', exchanges = 0;
   const cookie = host => `dsh-auth-fixture=${createHash('sha256').update(host + launch).digest('hex')}`;
@@ -54,9 +54,9 @@ export async function dshFixture({ host = '127.0.0.1' } = {}) {
   });
   const port = await listen(server, host);
   const connection = { authenticatedUrl: base => `${base}?token=${launch}`, requestRejection: ({ headers }) => trusted.has(headers.host) ? 401 : 403 };
-  const entry = { options: { name: '@deepseek-ai/dsh-client-connection' } }; let raw = { recovery: { retries: 3 }, trustedHosts: ['keep.example.com'] };
-  const services = { connection, webServer: { host, port, protocol: 'http:' }, configEditor: { entries: () => [entry], edit: async (_entry, change) => { raw = change(raw); raw.trustedHosts.forEach(h => trusted.add(h)); } } };
-  return { calls, trusted, port, ctx: { get: k => services[k] }, get raw() { return raw; }, get exchanges() { return exchanges; }, rotate: () => { launch = 'process-secret-two'; }, close: async () => { for (const s of sockets) s.destroy(); await new Promise(r => server.close(r)); } };
+  const entry = { options: { name: '@deepseek-ai/dsh-client-connection' } }; let raw = { recovery: { retries: 3 }, ...(trustedHosts === null ? {} : { trustedHosts }) };
+  const services = { connection, webServer: { host, port, protocol: 'http:' }, configEditor: { entries: () => [entry], edit: async (_entry, change) => { raw = change(raw); trusted.clear(); for (const h of Array.isArray(raw.trustedHosts) ? raw.trustedHosts : []) trusted.add(h); } } };
+  return { calls, trusted, port, services, setRaw: value => { raw = value; trusted.clear(); for (const h of Array.isArray(raw.trustedHosts) ? raw.trustedHosts : []) trusted.add(h); }, ctx: { get: k => services[k] }, get raw() { return raw; }, get exchanges() { return exchanges; }, rotate: () => { launch = 'process-secret-two'; }, close: async () => { for (const s of sockets) s.destroy(); await new Promise(r => server.close(r)); } };
 }
 export function memoryStore() {
   return { dir: '/unused', state: { version: 1, instanceId: '550e8400-e29b-41d4-a716-446655440000', owned: {}, pending: null, setup: null, autoConnect: false }, token: null, saves: [], closed: false, async save() { this.saves.push(structuredClone(this.state)); }, async writeToken(value) { this.token = value; }, async hasToken() { return !!this.token; }, async clearToken() { this.token = null; }, async confirmHost() { this.state.hostReview = null; await this.save(); }, async close() { this.closed = true; } };

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { dshPeerSatisfies } from '../src/updates.js';
+import semver from 'semver';
 import manifest from '../package.json' with { type: 'json' };
 
 const peer = manifest.peerDependencies['@deepseek-ai/dsh'];
@@ -11,9 +11,9 @@ const registry = spawnSync('npm', ['view', '@deepseek-ai/dsh', 'dist-tags', '--j
 if (registry.status !== 0) commandFailure(registry, 'DSH channel discovery');
 const tags = JSON.parse(registry.stdout);
 const installs = [...new Set(['0.2.1-alpha.2', '0.2.1-alpha.3', tags.alpha, tags.next])];
-for (const runtime of installs) if (!dshPeerSatisfies(runtime, peer)) fail(`current DSH alpha/next ${runtime} is outside ${peer}; review the new runtime before extending support`);
-const refused = ['*', 'x', '>=0', 'workspace:*', 'workspace:^', 'workspace:~', '>=0.2.1-alpha.2', '<99', '^0', '<=9.9.9', '<0.3.0-0', '>=0.2.1-alpha.2 <0.3.0', '0.2.x', '0.2.1-alpha.2 - 0.3.0'];
-const compared = [peer, '^0.2.1-alpha.2', '~0.2.1-alpha.2', '0.2.1-alpha.2', '~0.2.1', '', ' ', 'not a range'];
+// DSH's app-boot decides with semver.satisfies(runtime, range, { includePrerelease: true }).
+const satisfies = (runtime, range) => semver.satisfies(runtime, range, { includePrerelease: true });
+for (const runtime of installs) if (!satisfies(runtime, peer)) fail(`current DSH alpha/next ${runtime} is outside ${peer}; review the new runtime before extending support`);
 
 function fail(message) { throw new Error(message); }
 function commandFailure(result, label) {
@@ -44,19 +44,8 @@ try {
     for (const older of ['0.2.1-alpha.1', '0.3.0-0', '0.3.0-alpha.1', '0.3.0']) {
       if (bootAccepts(evaluate, older, peer)) fail(`published app-boot ${runtime} accepted ${peer} for runtime ${older}`);
     }
-    let acceptedByBoot = 0;
-    for (const range of refused) {
-      if (dshPeerSatisfies(runtime, range)) fail(`updater accepted a range outside >=0.2.1-alpha.2 <0.3.0-0: ${range} on ${runtime}`);
-      if (bootAccepts(evaluate, runtime, range)) acceptedByBoot++;
-    }
-    if (acceptedByBoot === 0) fail(`published app-boot ${runtime} rejected every unbounded sample, so this script did not observe the real boot predicate`);
-    for (const range of compared) {
-      const expected = bootAccepts(evaluate, runtime, range);
-      const actual = dshPeerSatisfies(runtime, range);
-      if (actual !== expected) fail(`updater ${actual} disagreed with app-boot ${runtime} (${expected}) for range ${JSON.stringify(range)}`);
-    }
   }
-  console.log(`peer ${peer} matches published evaluatePluginCompatibility on ${installs.join(' and ')}; the updater still refuses ranges outside >=0.2.1-alpha.2 <0.3.0-0 and workspace specs`);
+  console.log(`peer ${peer} is accepted by published evaluatePluginCompatibility on ${installs.join(', ')} and rejected for 0.2.1-alpha.1, 0.3.0-0, 0.3.0-alpha.1 and 0.3.0`);
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

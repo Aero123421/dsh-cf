@@ -10,6 +10,10 @@ function loopbackLookup(_host, options, callback) {
   else callback(null, addresses[0].address, addresses[0].family);
 }
 
+// The expression wrapper `trust` puts around a hand-written `trustedHosts` expression.
+const EXPR_HEAD = '[...new Set([...(';
+const exprTail = host => `), ${JSON.stringify(host)}])]`;
+
 /** Use only supported DSH seams; never read its signing secret or mutate internal services. */
 export class DshAdapter {
   constructor(ctx, config = {}) { this.ctx = ctx; this.config = config; this.cached = null; this.loading = null; }
@@ -20,19 +24,29 @@ export class DshAdapter {
     demand(Number.isInteger(web.port) && web.port > 0, 'DSH_PORT', 'DSH has not opened its Web listener yet.');
     return { port: web.port, protocol: web.protocol, address: web.host, connection };
   }
-  async trust(host) {
+  editor() {
     const editor = this.ctx.get('configEditor');
     demand(editor?.entries && editor?.edit, 'DSH_CONFIG', 'The official DSH configEditor service is required.');
     const entry = editor.entries().find(e => e.options.name === '@deepseek-ai/dsh-client-connection');
     demand(entry, 'DSH_CONFIG', 'The active Connection configuration is not editable through this profile.');
-    if (this.facts().connection.requestRejection({ headers: { host } }) !== 403) return;
+    return { editor, entry };
+  }
+  /**
+   * Makes DSH accept the public hostname. Returns `{ added }`: the edit this call made, or null when the host
+   * was already trusted. `form` and `created` are what `untrust` needs to undo exactly this edit.
+   */
+  async trust(host) {
+    const { editor, entry } = this.editor();
+    if (this.facts().connection.requestRejection({ headers: { host } }) !== 403) return { added: null };
+    let added = null;
     try {
       await editor.edit(entry, current => {
+        added = null;
         const raw = current.trustedHosts;
         let trustedHosts;
-        if (raw === undefined) trustedHosts = [host];
-        else if (Array.isArray(raw) && raw.every(x => typeof x === 'string')) trustedHosts = [...new Set([...raw, host])];
-        else if (typeof raw?.__jsExpr === 'string') trustedHosts = { __jsExpr: `[...new Set([...(${raw.__jsExpr}), ${JSON.stringify(host)}])]` };
+        if (raw === undefined) { trustedHosts = [host]; added = { hostname: host, form: 'array', created: true }; }
+        else if (Array.isArray(raw) && raw.every(x => typeof x === 'string')) { trustedHosts = [...new Set([...raw, host])]; if (!raw.includes(host)) added = { hostname: host, form: 'array', created: false }; }
+        else if (typeof raw?.__jsExpr === 'string') { trustedHosts = { __jsExpr: `${EXPR_HEAD}${raw.__jsExpr}${exprTail(host)}` }; added = { hostname: host, form: 'expr', created: false }; }
         else throw new CfError('DSH_CONFIG', 'Unrecognized trustedHosts configuration. It was not overwritten.');
         return { ...current, trustedHosts };
       });
@@ -45,6 +59,34 @@ export class DshAdapter {
     }
     demand(this.facts().connection.requestRejection({ headers: { host } }) === 401, 'DSH_TRUST', 'DSH did not activate the public hostname. Restart DSH and retry.');
     this.invalidate();
+    return { added };
+  }
+  /**
+   * Reverts exactly the edit `trust` recorded: the one host from an array, or the wrapper this plugin put around an
+   * expression. Returns 'reverted', 'absent' (nothing of ours is there) or 'left' (DSH refused or the form is unrecognized).
+   */
+  async untrust({ hostname: host, form, created }) {
+    let outcome = 'absent';
+    try {
+      const { editor, entry } = this.editor();
+      await editor.edit(entry, current => {
+        outcome = 'absent';
+        const raw = current.trustedHosts;
+        if (form === 'array' && Array.isArray(raw) && raw.every(x => typeof x === 'string')) {
+          if (!raw.includes(host)) return current;
+          const kept = raw.filter(x => x !== host); outcome = 'reverted';
+          if (created && kept.length === 0) { const { trustedHosts: _removed, ...rest } = current; return rest; }
+          return { ...current, trustedHosts: kept };
+        }
+        if (form === 'expr' && typeof raw?.__jsExpr === 'string') {
+          const tail = exprTail(host);
+          if (raw.__jsExpr.startsWith(EXPR_HEAD) && raw.__jsExpr.endsWith(tail) && raw.__jsExpr.length > EXPR_HEAD.length + tail.length) { outcome = 'reverted'; return { ...current, trustedHosts: { __jsExpr: raw.__jsExpr.slice(EXPR_HEAD.length, -tail.length) } }; }
+        }
+        outcome = 'left'; return current;
+      });
+    } catch { outcome = 'left'; }
+    this.invalidate();
+    return outcome;
   }
   invalidate() { this.cached = null; }
   async target(publicHost) {

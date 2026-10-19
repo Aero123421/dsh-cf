@@ -11,8 +11,10 @@ import * as jose from 'jose';
 import { DshAdapter } from '../src/dsh.js';
 import { Gate } from '../src/gate.js';
 import { accessVerifier } from '../src/access.js';
-import { dshPeerSatisfies, VERSION } from '../src/updates.js';
+import semver from 'semver';
 import manifest from '../package.json' with { type: 'json' };
+
+const VERSION = manifest.version;
 
 const source = dirname(dirname(fileURLToPath(import.meta.url)));
 const directory = await mkdtemp(join(tmpdir(), 'dsh-cf-smoke-'));
@@ -43,7 +45,7 @@ try {
   const runtime = process.env.DSH_CF_DSH_ROOT ? resolve(process.env.DSH_CF_DSH_ROOT) : join(directory, 'runtime');
   if (!process.env.DSH_CF_DSH_ROOT) await command('npm', ['install', '--prefix', runtime, '--ignore-scripts', '--no-audit', '--no-fund', `@deepseek-ai/dsh@${selector}`]);
   const runtimeVersion = JSON.parse(await readFile(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'), 'utf8')).version;
-  assert(dshPeerSatisfies(runtimeVersion, manifest.peerDependencies['@deepseek-ai/dsh']), `review DSH ${runtimeVersion} before extending support`);
+  assert(semver.satisfies(runtimeVersion, manifest.peerDependencies['@deepseek-ai/dsh'], { includePrerelease: true }), `review DSH ${runtimeVersion} before extending support`);
   const bin = join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js');
   const pack = JSON.parse(await command('npm', ['pack', '--json', '--pack-destination', directory], source));
   const home = join(directory, 'home'), env = { ...process.env, DSH_HOME: home };
