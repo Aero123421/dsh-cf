@@ -374,6 +374,107 @@ test('a busy saved gate port fails a resume as retryable, and an authorized star
   assert.equal(s.status, 'online'); assert.notEqual(f.store.state.gatePort, taken); assert.deepEqual(ports, [f.store.state.gatePort]); assert(f.store.state.gatePort > 0);
 });
 
+function statLine(start) {
+  return `42 (cloudflared) S ${Array.from({ length: 18 }, () => '0').join(' ')} ${start} 0\n`;
+}
+/** Injected process table. `signalProcess` records signals and never delivers them. */
+function identityIo(overrides = {}) {
+  const signals = [];
+  let clock = 0;
+  const io = {
+    platform: 'linux',
+    exists: async () => true,
+    signalProcess: (_pid, sig) => { signals.push(sig); },
+    now: () => clock,
+    pause: async ms => { clock += ms; },
+    ...overrides,
+  };
+  return { io, signals, clock: () => clock };
+}
+async function resumeInherited(t, record, io) {
+  const f = await fixture(t, { authorize: false, state: { ...savedState() }, overrides: { connectorIo: io } });
+  await withToken(f);
+  f.store.inheritedConnector = record;
+  f.store.assertOwnership = async () => {};
+  await f.act('resume');
+  await f.settle();
+  return f;
+}
+test('an unconfirmed previous cloudflared is not killed and no new one starts', async t => {
+  const cases = [
+    {
+      name: 'non-linux',
+      record: { pid: 42, start: 'Mon Oct 19 12:00:00 2026' },
+      io: identityIo({ platform: 'darwin', run: async () => { throw new Error('ps failed'); } }),
+    },
+    {
+      name: 'proc-fail',
+      record: { pid: 42, start: 100 },
+      io: identityIo({ readFile: async () => { throw Object.assign(new Error('unreadable'), { code: 'EACCES' }); } }),
+    },
+    {
+      name: 'start-null',
+      record: { pid: 42, start: null },
+      io: identityIo({ readFile: async () => statLine(100) }),
+    },
+  ];
+  for (const item of cases) {
+    const f = await resumeInherited(t, item.record, item.io.io);
+    assert.deepEqual(item.io.signals, [], item.name);
+    assert.equal(f.connectors.length, 0, item.name);
+    assert.equal(f.gates.length, 0, item.name);
+    const issue = f.controller.snapshot(true).issue;
+    assert.equal(issue.code, 'LOCK', item.name);
+    assert.equal(issue.reason, 'start-time', item.name);
+    assert.equal(issue.retryAt, undefined, item.name);
+    assert.equal(f.controller.snapshot(true).status, 'error', item.name);
+  }
+});
+test('a cloudflared that is still present two seconds after SIGKILL is not replaced', async t => {
+  const live = identityIo({
+    readFile: async path => String(path).endsWith('/cmdline') ? 'cloudflared\0tunnel\0' : String(path).endsWith('/stat') ? statLine(100) : 'Name:\tcloudflared\nState:\tS (sleeping)\n',
+  });
+  const running = await resumeInherited(t, { pid: 42, start: 100 }, live.io);
+  assert.deepEqual(live.signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(live.clock(), 7_000);
+  assert.equal(running.connectors.length, 0);
+  assert.equal(running.controller.snapshot(true).issue.code, 'LOCK');
+  assert.equal(running.controller.snapshot(true).issue.reason, 'stuck');
+  const zombie = identityIo({
+    readFile: async path => {
+      const name = String(path);
+      if (name.endsWith('/cmdline')) return '';
+      if (name.endsWith('/stat')) return statLine(100);
+      if (name.endsWith('/status')) return 'Name:\tcloudflared\nState:\tZ (zombie)\n';
+      return '';
+    },
+  });
+  const held = await resumeInherited(t, { pid: 42, start: 100 }, zombie.io);
+  assert.deepEqual(zombie.signals, ['SIGKILL']);
+  assert.equal(zombie.clock(), 2_000);
+  assert.equal(held.connectors.length, 0);
+  assert.equal(held.controller.snapshot(true).issue.reason, 'stuck');
+});
+test('a reused cloudflared pid is not killed and the new connector may start', async t => {
+  const io = identityIo({
+    readFile: async path => String(path).endsWith('/stat') ? statLine(999) : 'node\0other\0',
+  });
+  const f = await resumeInherited(t, { pid: 42, start: 100 }, io.io);
+  assert.deepEqual(io.signals, []);
+  assert.equal(f.connectors.length, 1);
+  assert.equal(f.controller.snapshot(true).status, 'online');
+});
+test('cloudflared is not started when this machine cannot read any process start time', async t => {
+  const f = await fixture(t, { authorize: false, state: { ...savedState() }, overrides: { readProcessStart: async () => null } });
+  await withToken(f);
+  await f.act('resume');
+  await f.settle();
+  assert.equal(f.connectors.length, 0);
+  assert.equal(f.controller.snapshot(true).issue.code, 'LOCK');
+  assert.equal(f.controller.snapshot(true).issue.reason, 'start-time');
+  assert.equal(f.controller.retry, null);
+});
+
 test('display names saved at setup keep the configured card readable without a token, and deletion drops them', async t => {
   const f = await fixture(t);
   await f.act('account', { accountId: SETUP.accountId });

@@ -199,6 +199,9 @@ test('recording a connector rewrites owner.lock in place and stays valid JSON', 
   const owner = JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8'));
   assert.deepEqual(owner.connector, { pid: 123, start: 456 });
   assert.equal(owner.nonce, store.lock);
+  await store.recordConnector({ pid: 7, start: 'Mon Oct 19 12:00:00 2026' });
+  assert.equal(JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8')).connector.start, 'Mon Oct 19 12:00:00 2026');
+  assert.throws(() => { store.recordConnector({ pid: 7, start: null }); }, { code: 'LOCK' });
   await store.clearConnector();
   const cleared = JSON.parse(await readFile(join(dir, 'owner.lock'), 'utf8'));
   assert.equal(cleared.connector, undefined);
@@ -295,14 +298,15 @@ await new Promise((resolve, reject) => { gate.once('error', reject); gate.listen
 const store = await new Store(dir, { heartbeatMs: 80 }).open();
 const record = store.inheritedConnector;
 if (!record) throw new Error('missing connector record');
-const gone = await stopRecordedConnector(record);
-const { readFile } = await import('node:fs/promises');
-const status = await readFile('/proc/' + record.pid + '/status', 'utf8').catch(() => '');
-const cmd = await readFile('/proc/' + record.pid + '/cmdline', 'utf8').catch(() => '');
-const zombie = /^State:\s+Z/m.test(status);
-if (cmd.includes('cloudflared') && !zombie) throw new Error('old cloudflared still alive ' + JSON.stringify({ record, zombie, cmd }));
+let outcome = await stopRecordedConnector(record);
+if (outcome !== 'stopped' && outcome !== 'replaced') {
+  process.send({ event: 'held', outcome, spawned: false, port: gate.address().port });
+  await new Promise(resolve => process.once('message', resolve));
+  outcome = await stopRecordedConnector(record);
+}
+if (outcome !== 'stopped' && outcome !== 'replaced') throw new Error('connector still ' + outcome);
 const child = spawn(binary, [], { stdio: 'ignore' });
-process.send({ event: 'spawned', pid: child.pid, gone, port: gate.address().port });
+process.send({ event: 'spawned', outcome, pid: child.pid, port: gate.address().port });
 setInterval(() => {}, 1000);
 `);
   const waiter = fork(waiterFile, [dir, binary], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
@@ -310,14 +314,29 @@ setInterval(() => {}, 1000);
   waiter.stdout?.on('data', chunk => { waiterLog += chunk; });
   waiter.stderr?.on('data', chunk => { waiterLog += chunk; });
   t.after(() => { try { waiter.kill('SIGKILL'); } catch { /* already gone */ } });
-  const spawned = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`waiter did not spawn: ${waiterLog.slice(0, 800)}`)), 8000);
+  const nextMessage = () => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`waiter did not answer: ${waiterLog.slice(0, 800)}`)), 12_000);
     waiter.once('message', message => { clearTimeout(timer); resolve(message); });
     waiter.once('exit', code => { clearTimeout(timer); reject(new Error(`waiter exited ${code}: ${waiterLog.slice(0, 800)}`)); });
   });
+  let spawned = await nextMessage();
+  if (spawned.event === 'held') {
+    assert.equal(spawned.spawned, false);
+    assert.equal(spawned.outcome, 'stuck');
+    owner.kill('SIGCONT');
+    const reapBy = Date.now() + 4_000;
+    while (Date.now() < reapBy) {
+      const status = await readFile(`/proc/${ready.pid}/status`, 'utf8').catch(() => '');
+      if (!status) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    waiter.send('retry', () => {});
+    spawned = await nextMessage();
+  }
   for (let i = 0; i < 5; i++) { await sample(); await new Promise(r => setTimeout(r, 100)); }
   clearInterval(poll);
-  assert.equal(spawned.gone, true);
+  assert.equal(spawned.event, 'spawned');
+  assert.ok(spawned.outcome === 'stopped' || spawned.outcome === 'replaced', spawned.outcome);
   assert.notEqual(spawned.port, ready.port);
   assert.notEqual(spawned.pid, ready.pid);
   assert(samples.length > 0);
@@ -333,10 +352,168 @@ test('a reused pid or a process that is not cloudflared is not killed', { skip: 
   t.after(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } });
   const start = await readProcessStart(child.pid);
   assert.equal(typeof start, 'number');
-  assert.equal(await stopRecordedConnector({ pid: child.pid, start }), true);
+  assert.equal(await stopRecordedConnector({ pid: child.pid, start }), 'replaced');
   assert.doesNotThrow(() => process.kill(child.pid, 0));
-  assert.equal(await stopRecordedConnector({ pid: child.pid, start: start + 1 }), true);
+  assert.equal(await stopRecordedConnector({ pid: child.pid, start: start + 1 }), 'replaced');
   assert.doesNotThrow(() => process.kill(child.pid, 0));
+});
+test('a connector record with no start time is inherited and is not treated as already gone', async t => {
+  const dir = await directory(t);
+  await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: 2147483647, nonce: 'stale', heartbeatMs: 40, connector: { pid: 42, start: null } }));
+  const store = await new Store(dir, { heartbeatMs: 40 }).open();
+  t.after(() => store.close());
+  assert.deepEqual(store.inheritedConnector, { pid: 42, start: null });
+});
+test('macOS lstart and Windows StartTime are read, and a failed read is null', async () => {
+  const { readProcessStart } = await import('../src/connector.js');
+  let darwin;
+  const lstart = await readProcessStart(42, {
+    platform: 'darwin',
+    run: async (bin, args, options) => {
+      darwin = { bin, args, locale: options?.env?.LC_ALL };
+      return 'Mon Oct 19 12:00:00 2026\n';
+    },
+  });
+  assert.equal(lstart, 'Mon Oct 19 12:00:00 2026');
+  assert.deepEqual(darwin, { bin: 'ps', args: ['-o', 'lstart=', '-p', '42'], locale: 'C' });
+  let windows;
+  const started = await readProcessStart(42, {
+    platform: 'win32',
+    run: async (bin, args) => { windows = { bin, command: args.at(-1) }; return '2026-10-19T12:00:00.0000000Z\n'; },
+  });
+  assert.equal(started, '2026-10-19T12:00:00.0000000Z');
+  assert.equal(windows.bin, 'powershell.exe');
+  assert.match(windows.command, /StartTime/);
+  assert.match(windows.command, /\b42\b/);
+  assert.equal(await readProcessStart(42, { platform: 'darwin', run: async () => { throw new Error('ps'); } }), null);
+  assert.equal(await readProcessStart(42, { platform: 'win32', run: async () => 'not-a-time' }), null);
+  assert.equal(await readProcessStart(42, { platform: 'freebsd', run: async () => { throw new Error('must not run'); } }), null);
+  assert.equal(await readProcessStart(42, { platform: 'linux', readFile: async () => { throw new Error('proc'); } }), null);
+});
+test('a resumed owner does not restart cloudflared after SIGCONT once the lease is gone', { skip: process.platform !== 'linux' }, async t => {
+  const { readdir } = await import('node:fs/promises');
+  const { fork } = await import('node:child_process');
+  const dir = await directory(t);
+  const binary = join(dir, 'cloudflared');
+  const statusPath = join(dir, 'status.json');
+  await writeFile(binary, '#!/usr/bin/env node\nconsole.error(JSON.stringify({level:"info",message:"Registered tunnel connection",connIndex:0}));\nsetInterval(()=>{},1000);\n', { mode: 0o700 });
+  const ownerFile = join(dir, 'owner.mjs');
+  await writeFile(ownerFile, `import { writeFile } from 'node:fs/promises';
+import { Store } from ${JSON.stringify(new URL('../src/store.js', import.meta.url).href)};
+import { Controller } from ${JSON.stringify(new URL('../src/controller.js', import.meta.url).href)};
+import { SETUP, AUD, connectorToken } from ${JSON.stringify(new URL('./helpers.js', import.meta.url).href)};
+const dir = process.argv[2], binary = process.argv[3], statusPath = process.argv[4];
+const store = await new Store(dir, { heartbeatMs: 80 }).open();
+store.state.setup = { ...SETUP };
+store.state.owned = { audience: AUD, appId: 'app', tunnelId: 'tunnel', dnsId: 'dns' };
+store.state.lastConfigurationCheck = '2026-10-01T00:00:00.000Z';
+store.state.autoConnect = true;
+store.state.proven = true;
+await store.save();
+await store.writeToken(connectorToken());
+const controller = new Controller({
+  store,
+  adapter: { facts() {}, async trust() { return { added: null }; }, async untrust() { return 'reverted'; }, invalidate() {} },
+  fetchImpl: async () => new Response(null, { status: 302, headers: { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login' } }),
+  dependencies: { ensureBinary: async () => ({ path: binary, version: 'fixture', source: 'selected' }) },
+  retryDelaysMs: [40],
+  retryCapMs: 40,
+});
+const report = () => {
+  const issue = controller.issue();
+  return writeFile(statusPath, JSON.stringify({ code: issue?.code || null, reason: issue?.reason || null, status: controller.status(), pid: controller.connector?.cloudflaredPid || null })).catch(() => {});
+};
+setInterval(() => { void report(); }, 40);
+controller.bootResume();
+const deadline = Date.now() + 15_000;
+while (Date.now() < deadline) {
+  const snap = controller.snapshot(true);
+  if (snap.status === 'online' && controller.connector?.cloudflaredPid) break;
+  await new Promise(r => setTimeout(r, 40));
+}
+if (controller.snapshot(true).status !== 'online') {
+  process.send({ event: 'error', code: controller.issue()?.code || '', message: String(controller.issue()?.message || '').slice(0, 240) });
+  process.exit(1);
+}
+await report();
+process.send({ event: 'online', pid: controller.connector.cloudflaredPid, port: store.state.gatePort });
+setInterval(() => {}, 1000);
+`);
+  const owner = fork(ownerFile, [dir, binary, statusPath], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  let ownerLog = '';
+  owner.stdout?.on('data', chunk => { ownerLog += chunk; });
+  owner.stderr?.on('data', chunk => { ownerLog += chunk; });
+  owner.on('error', () => {});
+  const killTree = () => {
+    try { owner.kill('SIGCONT'); } catch { /* already gone */ }
+    try { owner.kill('SIGKILL'); } catch { /* already gone */ }
+  };
+  t.after(killTree);
+  const online = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`owner did not publish: ${ownerLog.slice(0, 800)}`)), 16_000);
+    owner.once('message', message => { clearTimeout(timer); resolve(message); });
+    owner.once('exit', code => { clearTimeout(timer); reject(new Error(`owner exited ${code}: ${ownerLog.slice(0, 800)}`)); });
+  });
+  assert.equal(online.event, 'online', JSON.stringify(online));
+  const samples = [];
+  const observed = new Set();
+  let scanning = false;
+  const sample = async () => {
+    if (scanning) return;
+    scanning = true;
+    try {
+      const names = await readdir('/proc');
+      let count = 0;
+      for (const name of names) {
+        if (!/^\d+$/.test(name)) continue;
+        const cmd = await readFile(`/proc/${name}/cmdline`, 'utf8').catch(() => '');
+        const args = cmd.split('\0').filter(Boolean);
+        if (args[0] === binary || args[1] === binary) { count++; observed.add(Number(name)); }
+      }
+      samples.push(count);
+    } finally { scanning = false; }
+  };
+  const poll = setInterval(() => { void sample(); }, 100);
+  t.after(() => clearInterval(poll));
+  await sample();
+  owner.kill('SIGSTOP');
+  const waiterFile = join(dir, 'waiter.mjs');
+  await writeFile(waiterFile, `import { Store } from ${JSON.stringify(new URL('../src/store.js', import.meta.url).href)};
+import { stopRecordedConnector } from ${JSON.stringify(new URL('../src/connector.js', import.meta.url).href)};
+const store = await new Store(process.argv[2], { heartbeatMs: 80 }).open();
+const record = store.inheritedConnector;
+if (!record) throw new Error('missing connector record');
+const outcome = await stopRecordedConnector(record);
+process.send({ event: 'stopped', outcome, pid: record.pid });
+setInterval(() => {}, 1000);
+`);
+  const waiter = fork(waiterFile, [dir], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  let waiterLog = '';
+  waiter.stdout?.on('data', chunk => { waiterLog += chunk; });
+  waiter.stderr?.on('data', chunk => { waiterLog += chunk; });
+  waiter.on('error', () => {});
+  t.after(() => { try { waiter.kill('SIGKILL'); } catch { /* already gone */ } });
+  const stopped = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`waiter did not stop the connector: ${waiterLog.slice(0, 800)}`)), 12_000);
+    waiter.once('message', message => { clearTimeout(timer); resolve(message); });
+    waiter.once('exit', code => { clearTimeout(timer); reject(new Error(`waiter exited ${code}: ${waiterLog.slice(0, 800)}`)); });
+  });
+  assert.ok(['stopped', 'replaced', 'stuck', 'unverified'].includes(stopped.outcome), stopped.outcome);
+  owner.kill('SIGCONT');
+  let reported;
+  const until = Date.now() + 8_000;
+  while (Date.now() < until) {
+    await sample();
+    try { reported = JSON.parse(await readFile(statusPath, 'utf8')); } catch { reported = null; }
+    if (reported?.code === 'LOCK' && !reported.pid) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  clearInterval(poll);
+  assert.equal(reported?.code, 'LOCK', JSON.stringify(reported));
+  assert.equal(reported.pid, null);
+  assert(samples.length > 0);
+  assert(samples.every(count => count <= 1), `counts ${samples.join(',')}`);
+  assert(observed.size <= 1, `pids ${[...observed].join(',')}`);
 });
 test('closing releases in-process ownership so a reloaded plugin can reopen the profile', async t => {
   const dir = await directory(t); const first = await new Store(dir).open(); await first.close();
@@ -395,6 +572,7 @@ test('guardian starts a real fixture child with the exact argv and stops only th
   const statuses = []; const connector = new Connector(s => statuses.push(s)); t.after(() => connector.stop());
   const tokenFile = join(dir, 'tunnel.token');
   await connector.start(binary, tokenFile);
+  assert.equal(typeof connector.cloudflaredPid, 'number');
   for (let i = 0; !statuses.includes('connected') && !statuses.includes('error') && i < 150; i++) await new Promise(r => setTimeout(r, 20));
   assert(statuses.includes('connected'), statuses.join(','));
   const argv = JSON.parse(await readFile(argvFile, 'utf8'));

@@ -2,8 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Store } from './store.js';
 import { DshAdapter } from './dsh.js';
-import { Controller, UnavailableController } from './controller.js';
-import { safeError } from './common.js';
+import { Controller, UnavailableController, issueOf } from './controller.js';
+import { CfError, safeError } from './common.js';
 import { rpcRoute } from './rpc.js';
 
 export const name = 'dsh-cf';
@@ -65,8 +65,12 @@ export async function apply(ctx, config = {}) {
         try { await controller.releaseInheritedConnector(); }
         catch (error) {
           released = false;
-          controller.failure = { code: 'CONNECTOR_EXIT', message: 'The previous cloudflared is still running, so this DSH did not start another.', action: 'resume' };
-          controller.scheduleRetry?.(error?.code ? error : { code: 'CONNECTOR_EXIT' });
+          if (error?.code === 'LOCK') controller.failure = issueOf(error);
+          else {
+            const wrapped = error?.code === 'CONNECTOR_EXIT' ? error : new CfError('CONNECTOR_EXIT', 'The previous cloudflared is still running, so this DSH did not start another.');
+            controller.failure = issueOf(wrapped);
+            controller.scheduleRetry?.(wrapped);
+          }
         }
         // The first Connection injection already consumed its one boot call on the placeholder.
         if (restored && released) controller.bootResume();

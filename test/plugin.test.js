@@ -43,6 +43,34 @@ async function dshHost(t, { manager, config, prepare } = {}) {
   const call = (endpoint, { payload = {}, method = endpoint, headers = {}, body } = {}) => http(port, { path: `/dsh-cf/${endpoint}`, method: 'POST', headers: { host: `127.0.0.1:${port}`, cookie: COOKIE, 'content-type': 'application/json', ...headers }, body: body ?? JSON.stringify({ type: 'client-request', rpcId: 'rpc-1', method, payload }) });
   return { dir, routes, call, dispose, port };
 }
+test('reclaiming a connector with no start time does not kill it or start another', async t => {
+  const { spawn } = await import('node:child_process');
+  const { fingerprint } = await import('../src/store.js');
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  t.after(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } });
+  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  const f = await dshHost(t, { prepare: async directory => {
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'state.json'), JSON.stringify({ version: 1, instanceId: '550e8400-e29b-41d4-a716-446655440000', machine: fingerprint(), autoConnect: false, gatePort: 0, setup: { hostname: 'dsh.example.com' }, owned: {}, pending: null }));
+    await writeFile(join(directory, 'owner.lock'), JSON.stringify({ pid: 2147483647, nonce: 'stale', heartbeatMs: 40, connector: { pid: child.pid, start: null } }));
+  } });
+  const read = async () => JSON.parse((await f.call('status')).body).result.value;
+  let body;
+  for (let i = 0; i < 80 && body?.issue?.reason !== 'start-time'; i++) {
+    body = await read();
+    await new Promise(r => setTimeout(r, 50));
+  }
+  assert.equal(body.issue.code, 'LOCK');
+  assert.equal(body.issue.reason, 'start-time');
+  assert.equal(body.status, 'error');
+  assert.doesNotThrow(() => process.kill(child.pid, 0));
+  await new Promise(r => setTimeout(r, 200));
+  const later = await read();
+  assert.equal(later.status, 'error');
+  assert.equal(later.issue.reason, 'start-time');
+  assert.equal(later.issue.retryAt, undefined);
+  assert.doesNotThrow(() => process.kill(child.pid, 0));
+});
 test('the settings channel is served on WebServer even though DSH rpc.handle() cannot be used by plugins', async t => {
   const f = await dshHost(t); assert(f.routes.has('/dsh-cf'));
   const r = await f.call('status'); assert.equal(r.status, 200);

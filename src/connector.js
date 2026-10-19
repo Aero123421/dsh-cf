@@ -20,9 +20,9 @@ export function childEnv(env = process.env) {
   for (const key of ['PATH', 'HOME', 'USERPROFILE', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LOCALAPPDATA', 'ProgramFiles', 'PROGRAMDATA']) if (env[key]) out[key] = env[key];
   return out;
 }
-export async function run(binary, args, { signal, ms = 10_000 } = {}) {
+export async function run(binary, args, { signal, ms = 10_000, env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { shell: false, windowsHide: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'], signal: timeout(signal, ms), killSignal: 'SIGKILL' });
+    const child = spawn(binary, args, { shell: false, windowsHide: true, env: { ...childEnv(), ...env }, stdio: ['ignore', 'pipe', 'pipe'], signal: timeout(signal, ms), killSignal: 'SIGKILL' });
     let output = '';
     child.stdout.on('data', chunk => { output = (output + chunk).slice(-16_384); });
     child.stderr.on('data', () => {});
@@ -128,48 +128,143 @@ export async function ensureBinary({ dir, selected = '', allowDownload = false, 
   } finally { await rm(staging, { recursive: true, force: true }); }
 }
 
-/** Linux process start counter from /proc. A reused PID has a different value. */
-export async function readProcessStart(pid) {
-  if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return null;
-  const text = await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => '');
-  const end = text.lastIndexOf(')');
+const START_MAX = 80;
+/** Linux starttime, macOS `ps -o lstart=`, or a Windows StartTime. Empty and unreadable values are null. */
+export function normalizeStart(value) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (text.length >= 1 && text.length <= START_MAX && !/[\u0000\r\n]/.test(text)) return text;
+  }
+  return null;
+}
+function linuxStart(text) {
+  const end = String(text).lastIndexOf(')');
   if (end < 0) return null;
-  const start = Number(text.slice(end + 2).split(' ')[19]);
-  return Number.isSafeInteger(start) ? start : null;
-}
-async function commandLine(pid) {
-  return readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
-}
-async function sameCloudflared(record) {
-  if (!record || !Number.isSafeInteger(record.pid) || !Number.isSafeInteger(record.start)) return false;
-  if (await readProcessStart(record.pid) !== record.start) return false;
-  return (await commandLine(record.pid)).includes('cloudflared');
+  const start = Number(String(text).slice(end + 2).split(' ')[19]);
+  return Number.isSafeInteger(start) && start >= 0 ? start : null;
 }
 /**
- * Stop the cloudflared recorded in owner.lock. A PID is killed only when its start time and command line still
- * match that cloudflared. Returns true when no such process remains (including when the record does not match).
+ * Start time of `pid`, or null when this machine cannot report one.
+ * Linux reads `/proc/<pid>/stat` starttime. macOS runs `ps -o lstart= -p <pid>`.
+ * Windows reads the process StartTime. `io` is how tests supply a platform without signaling a real process.
  */
-export async function stopRecordedConnector(record, { signal } = {}) {
-  if (!record) return true;
-  if (!(await sameCloudflared(record))) return true;
-  const deadline = Date.now() + 5_000;
-  try { process.kill(record.pid, 'SIGTERM'); } catch (error) { if (error?.code === 'ESRCH') return true; }
-  while (Date.now() < deadline) {
-    if (!(await sameCloudflared(record))) return true;
-    await pause(100, signal);
+export async function readProcessStart(pid, io = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  const platform = io.platform ?? process.platform;
+  const read = io.readFile ?? readFile;
+  const runCommand = io.run ?? run;
+  if (platform === 'linux') return linuxStart(await read(`/proc/${pid}/stat`, 'utf8').catch(() => ''));
+  if (platform === 'darwin') {
+    try { return normalizeStart(await runCommand('ps', ['-o', 'lstart=', '-p', String(pid)], { env: { LC_ALL: 'C' } })); }
+    catch { return null; }
   }
-  if (!(await sameCloudflared(record))) return true;
-  try { process.kill(record.pid, 'SIGKILL'); } catch (error) { if (error?.code === 'ESRCH') return true; }
-  const killed = Date.now() + 2_000;
-  while (Date.now() < killed) {
-    if (!(await sameCloudflared(record))) return true;
-    await pause(100, signal);
+  if (platform === 'win32') {
+    const command = `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`;
+    try {
+      const text = normalizeStart(await runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command]));
+      return typeof text === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(text) ? text : null;
+    } catch { return null; }
   }
-  return !(await sameCloudflared(record));
+  return null;
+}
+async function commandLine(pid, io) {
+  const platform = io.platform ?? process.platform;
+  const read = io.readFile ?? readFile;
+  const runCommand = io.run ?? run;
+  if (platform === 'linux') return read(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
+  if (platform === 'darwin') {
+    try { return await runCommand('ps', ['-o', 'args=', '-p', String(pid)], { env: { LC_ALL: 'C' } }); }
+    catch { return null; }
+  }
+  if (platform === 'win32') {
+    const command = `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`;
+    try { return await runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command]); }
+    catch { return null; }
+  }
+  return null;
+}
+async function processExists(pid, io) {
+  if (io.exists) return io.exists(pid);
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code !== 'ESRCH'; }
+}
+async function processZombie(pid, io) {
+  if (io.isZombie) return io.isZombie(pid);
+  if ((io.platform ?? process.platform) !== 'linux') return false;
+  const read = io.readFile ?? readFile;
+  return /^State:\s+Z/m.test(await read(`/proc/${pid}/status`, 'utf8').catch(() => ''));
+}
+/** `gone` when the pid is free, `match` or `zombie` for the recorded cloudflared, `replaced` for another process, `unverified` when the start time cannot be checked. */
+async function identifyConnector(record, io) {
+  if (!record || !Number.isSafeInteger(record.pid) || record.pid <= 0 || normalizeStart(record.start) == null) return 'unverified';
+  if (!(await processExists(record.pid, io))) return 'gone';
+  const start = await readProcessStart(record.pid, io);
+  if (start == null) return 'unverified';
+  if (start !== normalizeStart(record.start)) return 'replaced';
+  const cmd = await commandLine(record.pid, io);
+  if (typeof cmd !== 'string') return 'unverified';
+  if (cmd.includes('cloudflared')) return 'match';
+  if (cmd.trim() === '') return (await processZombie(record.pid, io)) ? 'zombie' : 'unverified';
+  return 'replaced';
+}
+/**
+ * Stop the cloudflared recorded in owner.lock.
+ * `stopped` — that process is gone. `replaced` — the PID belongs to something else and was not signaled.
+ * `unverified` — the start time could not be checked; nothing was signaled.
+ * `stuck` — the process was confirmed and is still present about two seconds after SIGKILL.
+ * A caller must not start another cloudflared after `unverified` or `stuck`.
+ */
+export async function stopRecordedConnector(record, io = {}) {
+  if (!record) return 'stopped';
+  const signal = io.signal;
+  const wait = io.pause ?? pause;
+  const now = io.now ?? Date.now;
+  const termMs = io.termMs ?? 5_000;
+  const killMs = io.killMs ?? 2_000;
+  const send = name => {
+    const signalProcess = io.signalProcess ?? ((pid, sig) => process.kill(pid, sig));
+    try { signalProcess(record.pid, name); return 'sent'; }
+    catch (error) { return error?.code === 'ESRCH' ? 'missing' : 'denied'; }
+  };
+  const finish = async sig => {
+    const kind = await identifyConnector(record, io);
+    if (kind === 'gone') return 'stopped';
+    if (kind === 'replaced') return 'replaced';
+    if (kind === 'unverified') return 'unverified';
+    if (kind === 'zombie' && sig === 'SIGTERM') return 'pending';
+    const sent = send(sig);
+    if (sent === 'missing') return (await processExists(record.pid, io)) ? 'stuck' : 'stopped';
+    if (sent === 'denied') return 'stuck';
+    const deadline = now() + (sig === 'SIGKILL' ? killMs : termMs);
+    while (now() < deadline) {
+      const next = await identifyConnector(record, io);
+      if (next === 'gone') return 'stopped';
+      if (next === 'replaced') return 'replaced';
+      if (next === 'unverified') return 'unverified';
+      if (next === 'zombie' && sig === 'SIGTERM') return 'pending';
+      await wait(100, signal);
+    }
+    const last = await identifyConnector(record, io);
+    if (last === 'gone') return 'stopped';
+    if (last === 'replaced') return 'replaced';
+    if (last === 'unverified') return 'unverified';
+    return 'pending';
+  };
+  const first = await identifyConnector(record, io);
+  if (first === 'gone') return 'stopped';
+  if (first === 'replaced') return 'replaced';
+  if (first === 'unverified') return 'unverified';
+  if (first === 'match') {
+    const termed = await finish('SIGTERM');
+    if (termed !== 'pending') return termed;
+  }
+  const killed = await finish('SIGKILL');
+  return killed === 'pending' ? 'stuck' : killed;
 }
 /** A guardian kills only its own connector on parent IPC loss, including a crashed DSH host. */
 export class Connector {
-  constructor(onStatus = () => {}) { this.onStatus = onStatus; this.process = null; this.stopping = false; this.failed = false; this.cloudflaredPid = null; }
+  constructor(onStatus = () => {}) { this.onStatus = onStatus; this.process = null; this.stopping = false; this.failed = false; this.cloudflaredPid = null; this.reportsPid = true; }
   async start(binary, tokenFile) {
     demand(!this.process, 'CONNECTOR_RUNNING', 'A connector is already running.');
     this.stopping = false; this.failed = false; this.cloudflaredPid = null;
@@ -180,13 +275,21 @@ export class Connector {
       if (status === 'error' || (status === 'stopped' && !this.stopping)) this.failed = true;
       this.onStatus(this.failed ? 'error' : status);
     };
+    let notePid = () => {};
+    const reported = new Promise(resolve => {
+      const timer = setTimeout(resolve, 2_000);
+      timer.unref?.();
+      notePid = () => { clearTimeout(timer); resolve(); };
+      child.once('exit', notePid);
+    });
     child.on('message', value => {
-      if (value?.type === 'connector' && Number.isSafeInteger(value.pid) && value.pid > 0) this.cloudflaredPid = value.pid;
+      if (value?.type === 'connector' && Number.isSafeInteger(value.pid) && value.pid > 0) { this.cloudflaredPid = value.pid; notePid(); }
       if (value?.type === 'status' && ['starting', 'connected', 'disconnected', 'error', 'stopped'].includes(value.status)) report(value.status);
     });
     child.on('error', () => report('error'));
     child.once('exit', () => { if (this.process === child) { report(this.stopping ? 'stopped' : 'error'); this.process = null; } });
     child.send({ type: 'start', binary, tokenFile });
+    await reported;
   }
   async stop() {
     const child = this.process; if (!child) return;

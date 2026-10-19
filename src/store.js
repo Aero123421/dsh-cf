@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { hostname as machineName, homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { CfError, demand, digest, nonce, pause } from './common.js';
+import { normalizeStart } from './connector.js';
 
 const ACCOUNT_ID = /^[a-f0-9]{32}$/;
 const TUNNEL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -72,12 +73,11 @@ export const fingerprintV2 = async (readId = readMachineId, { platform = process
 const OPEN = globalThis[Symbol.for('dsh-cf.open-stores')] ??= new Set();
 const MAX_ACCEPTED_HOSTS = 8;
 const lockMtime = async path => { try { return (await stat(path)).mtimeMs; } catch { return null; } };
-/** Identity of a cloudflared this profile started. `start` is the OS process start counter, so a reused PID does not match. */
+/** Identity of a cloudflared this profile started. `start` is an OS start time, so a reused PID does not match. A missing start is kept so the next owner cannot treat that process as already gone. */
 export function connectorRecord(value) {
-  if (!value || typeof value !== 'object') return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   if (!Number.isSafeInteger(value.pid) || value.pid <= 0) return null;
-  if (!Number.isSafeInteger(value.start) || value.start < 0) return null;
-  return { pid: value.pid, start: value.start };
+  return { pid: value.pid, start: normalizeStart(value.start) };
 }
 export class Store {
   /**
@@ -188,7 +188,7 @@ export class Store {
   /** cloudflared pid and start time, so the next owner can stop that process after a takeover. Not a lock decision. */
   recordConnector(connector) {
     const record = connectorRecord(connector);
-    demand(record, 'LOCK', 'The connector identity is incomplete, so it was not recorded.');
+    demand(record?.start != null, 'LOCK', 'The connector identity is incomplete, so it was not recorded.');
     return this.writeLock(owner => ({ ...owner, connector: record }));
   }
   clearConnector() { return this.writeLock(owner => { const next = { ...owner }; delete next.connector; return next; }); }
