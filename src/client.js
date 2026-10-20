@@ -1208,5 +1208,6 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'dsh-cf', order: 20, label, locale: 'dsh-cf' }, SettingsPanel));
     }
     return { apply, inject: ['slots', 'connection', 'locale'], PanelSession, SnapshotCursor, connectBlockers, hostnameIssue, emailOk, guideKey, issueText, describeError, issueAction, issueTone, pendingModes, viewOf, statusOf, primaryAction, relative, translate, COPY, DRAFT, resetDraft, GUIDE, EVIDENCE, STEP_IDS };
+    addLanguage();
   },
 });
