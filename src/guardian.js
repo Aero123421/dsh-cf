@@ -29,6 +29,7 @@ process.on('message', async message => {
     const config = join(directory, 'config.yml'); await writeFile(config, '{}\n', { mode: 0o600 });
     if (stopping) { await rm(directory, { recursive: true, force: true }); return; }
     child = spawn(message.binary, connectorArgs(config, message.tokenFile), { shell: false, windowsHide: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    if (process.connected && child.pid) process.send({ type: 'connector', pid: child.pid });
     report('starting'); let buffer = '';
     const registered = new Set();
     const parse = chunk => {

@@ -262,7 +262,10 @@ window.__ModuleLoader__.load({
     T('i_writeMismatch', 'What Cloudflare holds does not match the chosen recovery action. Nothing was deleted or cleared. Check the result again.', 'Cloudflareにある資源が、選んだ復旧操作と合いません。削除も解除もしていません。結果をもう一度確認してください。', 'Cloudflare 中的资源与所选的恢复操作不符。没有删除或清除任何内容。请重新查看结果。');
     T('i_hostReview', 'This profile was last used on a different computer or user. Confirm below that no other DSH uses its Tunnel.', 'このプロファイルは、前回と違うPCまたはユーザーで使われました。このTunnelを使うDSHが他にないことを、下で確認してください。', '这个配置上次是在不同的电脑或用户下使用的。请在下方确认没有其他 DSH 使用它的 Tunnel。');
     T('i_verifyFirst', 'Auto-publish can be turned on only after the external connection check has succeeded.', '自動公開は、外部からの通信の確認が済んでからオンにできます。', '外部连接确认成功后，才能开启自动公开。');
-    T('i_lock', 'Another DSH is using this profile, or this one lost it. Publishing is stopped. Close the other DSH, then reload this one.', '別のDSHがこのプロファイルを使っているか、このDSHが使用権を失いました。公開は止まっています。もう一方のDSHを終了してから、このDSHを読み込み直してください。', '另一个 DSH 正在使用这个配置，或这个 DSH 失去了使用权。公开已停止。请先关闭另一个 DSH，再重新加载这个 DSH。');
+    T('i_lock', 'Another DSH is using this profile, or this one lost it. Publishing is stopped. Restart this DSH.', '別のDSHがこのプロファイルを使っているか、このDSHが使用権を失いました。公開は止まっています。このDSHを再起動してください。', '另一个 DSH 正在使用这个配置，或这个 DSH 失去了使用权。公开已停止。请重新启动这个 DSH。');
+    T('i_lockStart', 'This computer could not read a process start time, so the previous cloudflared was left running and another was not started. Publishing stays stopped. Restart this DSH once start times can be read.', 'プロセスの開始時刻を読めなかったため、以前のcloudflaredは止めず、新しいcloudflaredも起動していません。公開は止まったままです。開始時刻を読めるようにしてから、このDSHを再起動してください。', '无法读取进程的开始时间，因此没有停止以前的 cloudflared，也没有启动新的 cloudflared。公开保持停止。请在可以读取开始时间后重新启动这个 DSH。');
+    T('i_lockStuck', 'The previous cloudflared was still listed two seconds after it was stopped, so another was not started. Publishing stays stopped. Restart this DSH once that process is gone.', '以前のcloudflaredを止めたあと2秒経ってもプロセスが残っていたため、新しいcloudflaredは起動していません。公開は止まったままです。そのプロセスが居なくなってから、このDSHを再起動してください。', '停止以前的 cloudflared 两秒后该进程仍在，因此没有启动新的 cloudflared。公开保持停止。请在该进程消失后重新启动这个 DSH。');
+    T('i_lockSignaled', 'A stop signal was sent to the previous cloudflared, but this computer could not confirm that it had exited, so another was not started. Publishing stays stopped. Restart this DSH once that process is gone.', '以前のcloudflaredへ停止シグナルを送りましたが、終了したことを確認できませんでした。新しいcloudflaredは起動していません。公開は止まったままです。そのプロセスが居なくなってから、このDSHを再起動してください。', '已向以前的 cloudflared 发送停止信号，但无法确认它已经退出，因此没有启动新的 cloudflared。公开保持停止。请在该进程消失后重新启动这个 DSH。');
     T('i_stateCorrupt', 'The saved plugin state could not be read, so nothing was changed. Keep a copy of .dsh-cf/state.json in the profile folder, fix it or move it aside, then reload DSH.', '保存されたプラグインの状態を読めなかったため、何も変更していません。プロファイルの.dsh-cf/state.jsonを控えてから、直すか別の場所へ移し、DSHを読み込み直してください。', '无法读取已保存的插件状态，因此没有做任何更改。请先备份配置文件夹中的 .dsh-cf/state.json，修复或移开后重新加载 DSH。');
     T('i_statePath', 'The plugin’s state folder is not a private, regular folder. Fix .dsh-cf in the profile folder, then reload DSH.', 'プラグインの状態の保存先が、通常の非公開フォルダーではありません。プロファイルの.dsh-cfを直してから、DSHを読み込み直してください。', '插件的状态文件夹不是普通的私有文件夹。请修复配置文件夹中的 .dsh-cf，然后重新加载 DSH。');
     T('i_stateWrite', 'The verification result could not be saved, so publishing was stopped. Check the file permissions of the profile folder, then resume.', '確認結果を保存できなかったため、公開を止めました。プロファイルのフォルダーの権限を確認してから、再開してください。', '无法保存确认结果，因此已停止公开。请检查配置文件夹的权限，然后恢复。');
@@ -354,6 +357,9 @@ window.__ModuleLoader__.load({
     const SAFE_CODE = /^(?:[A-Z][A-Z0-9_]{0,50}|AbortError|TimeoutError)$/;
     /** Localized guidance for an issue or a failed call. Unknown codes fall back to the host's own English sentence. */
     function issueText(t, issue) {
+      if (issue?.reason === 'start-time') return t('i_lockStart');
+      if (issue?.reason === 'stuck') return t('i_lockStuck');
+      if (issue?.reason === 'unverified-after-signal') return t('i_lockSignaled');
       const key = guideKey(issue?.code);
       if (key) return t('i_' + key);
       const message = issue?.message;
@@ -479,9 +485,10 @@ window.__ModuleLoader__.load({
 
     // Scoped to .dcf. Colors, radii and type come from --dsw-* tokens; the primitives bring their own styling.
     const CSS = `
-.dcf{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;min-width:0;max-width:720px;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
+.dcf{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;min-width:0;max-width:min(720px,100%);overflow-wrap:break-word;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
 .dcf *,.dcf *::before,.dcf *::after{box-sizing:border-box}
-.dcf button{white-space:nowrap}
+.dcf>*{min-width:0;max-width:100%}
+.dcf button{white-space:normal;max-width:100%;min-width:0;overflow-wrap:anywhere}
 .dcf h2{margin:0;font-size:16px;line-height:24px;font-weight:500}
 .dcf h3{margin:0;font-size:14px;line-height:22px;font-weight:500}
 .dcf p{margin:0}
@@ -507,9 +514,9 @@ window.__ModuleLoader__.load({
 .dcf-status{display:flex;align-items:center;gap:10px}
 .dcf-status-word{white-space:nowrap;font-size:16px;line-height:24px;font-weight:500}
 .dcf-status-top{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}
-.dcf-url{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}
-.dcf-url-text{min-width:0;flex:1 1 180px;font-size:14px;line-height:22px;overflow-wrap:anywhere;user-select:text}
-.dcf-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.dcf-url{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px;min-width:0;max-width:100%}
+.dcf-url-text{min-width:0;flex:1 1 8em;font-size:14px;line-height:22px;overflow-wrap:anywhere;user-select:text}
+.dcf-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0;max-width:100%}
 .dcf-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .dcf-label{font-size:13px;line-height:20px;font-weight:500;color:var(--dsw-alias-label-primary)}
 .dcf-hint{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}

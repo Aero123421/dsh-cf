@@ -32,7 +32,7 @@ test('every language has the same keys, and no key is left without a use', async
     step_: plugin.STEP_IDS, ev_: plugin.EVIDENCE, ss_: ['idle', 'working', 'waiting', 'done', 'error'],
     cn_: ['connected', 'starting', 'disconnected', 'error', 'stopped'], dl_: ['metadata', 'downloading', 'verified'],
     pi_: ['found', 'not-found', 'ambiguous'], pm_: ['clear-recorded', 'delete-unrecorded', 'clear-not-found'], pmd_: ['clear-recorded', 'delete-unrecorded', 'clear-not-found'],
-    i_: [...new Set(Object.values(plugin.GUIDE)), 'cfDenied', 'cfMissing', 'cfRate', 'cfServer', 'cfOther', 'generic'],
+    i_: [...new Set(Object.values(plugin.GUIDE)), 'cfDenied', 'cfMissing', 'cfRate', 'cfServer', 'cfOther', 'generic', 'lockStart', 'lockStuck', 'lockSignaled'],
   };
   const dynamic = new Set();
   for (const [prefix, values] of Object.entries(families)) for (const value of values) { dynamic.add(prefix + value); assert(keys.includes(prefix + value), `missing ${prefix}${value}`); }
@@ -65,7 +65,7 @@ test('every code the host can report has localized guidance in every language', 
     for (const match of text.matchAll(/['"`]([A-Z][A-Z0-9_]{2,})['"`]/g)) codes.add(match[1]);
   }
   // Public-gate rejections never reach the settings page; the rest are environment names, HTTP verbs and signals.
-  const notForSettings = /^(?:AUTH|AUTH_OWNER|AUTH_UNAVAILABLE|HOST|ORIGIN|PATH|BODY|UPGRADE|CNAME|DELETE|GET|HEAD|POST|PUT|DSH_|EADDRINUSE|EEXIST|ENOENT|ERR_.*|HOME|LOCALAPPDATA|PROGRAMDATA|SYSTEMROOT|TEMP|TMP|TMPDIR|USERPROFILE|WINDIR|RS256|SIGINT|SIGKILL|SIGTERM)$/;
+  const notForSettings = /^(?:AUTH|AUTH_OWNER|AUTH_UNAVAILABLE|HOST|ORIGIN|PATH|BODY|UPGRADE|CNAME|DELETE|GET|HEAD|POST|PUT|DSH_|EADDRINUSE|EEXIST|ENOENT|EPERM|ESRCH|ERR_.*|HOME|LC_ALL|LOCALAPPDATA|PROGRAMDATA|SYSTEMROOT|TEMP|TMP|TMPDIR|USERPROFILE|WINDIR|RS256|SIGINT|SIGKILL|SIGTERM)$/;
   const missing = [...codes].filter(code => !notForSettings.test(code) && !plugin.guideKey(code));
   assert.deepEqual(missing, []);
   for (const code of [...codes, 'CF_401', 'CF_403', 'CF_404', 'CF_429', 'CF_500', 'CF_502', 'AbortError', 'TimeoutError']) {
@@ -90,6 +90,10 @@ test('messages are localized, hide raw codes and never trust an unsafe code or a
     assert.equal(plugin.describeError(t, { code: 'NEW_CODE', hostMessage: 'x'.repeat(401) }).text, t('i_generic'));
     assert.equal(plugin.describeError(t, new Error('network')).text, t('i_generic'));
     assert.equal(plugin.issueText(t, { code: 'WRITE_UNKNOWN', message: 'raw' }), t('i_writeUnknown'));
+    assert.equal(plugin.issueText(t, { code: 'LOCK', reason: 'start-time', message: 'raw' }), t('i_lockStart'));
+    assert.equal(plugin.issueText(t, { code: 'LOCK', reason: 'stuck', message: 'raw' }), t('i_lockStuck'));
+    assert.equal(plugin.issueText(t, { code: 'LOCK', reason: 'unverified-after-signal', message: 'raw' }), t('i_lockSignaled'));
+    assert.equal(plugin.issueText(t, { code: 'LOCK', message: 'raw' }), t('i_lock'));
   }
   assert.equal(plugin.issueTone({ code: 'TUNNEL_DISCONNECTED' }, 'reconnecting'), 'info');
   assert.equal(plugin.issueTone({ code: 'DSH_UPSTREAM' }, 'online'), 'warn');
