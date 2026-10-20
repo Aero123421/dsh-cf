@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { Controller, UnavailableController } from '../src/controller.js';
+import { stopRecordedConnector } from '../src/connector.js';
 import { Gate } from '../src/gate.js';
 import { CfError } from '../src/common.js';
 import { SETUP, AUD, HOST, fakeCloudflare, memoryStore, listen } from './helpers.js';
@@ -463,6 +464,92 @@ test('a reused cloudflared pid is not killed and the new connector may start', a
   assert.deepEqual(io.signals, []);
   assert.equal(f.connectors.length, 1);
   assert.equal(f.controller.snapshot(true).status, 'online');
+});
+const ENOENT = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+/** `exists` is true, then a chosen read fails. The next `exists` is `stillThere`. After SIGTERM the same split applies. */
+function raceIo({ platform = 'linux', when, file, stillThere, delayMs }) {
+  const signals = [];
+  let clock = 0;
+  let armed = false;
+  let pendingRecheck = false;
+  const io = {
+    platform,
+    exists: async () => {
+      if (delayMs != null) return !armed || clock < delayMs;
+      if (when === 'after' && !armed) return true;
+      if (!pendingRecheck) { pendingRecheck = true; return true; }
+      pendingRecheck = false;
+      return stillThere;
+    },
+    readFile: async path => {
+      const name = String(path);
+      const key = name.endsWith('/cmdline') ? 'cmdline' : name.endsWith('/status') ? 'status' : 'stat';
+      if (delayMs == null && (when === 'before' || armed) && key === file) throw ENOENT;
+      if (key === 'stat') return statLine(100);
+      if (key === 'cmdline') return file === 'status' && delayMs == null && (when === 'before' || armed) ? '' : 'cloudflared\0tunnel\0';
+      return 'Name:\tcloudflared\nState:\tS (sleeping)\n';
+    },
+    run: async (_bin, args) => {
+      const command = String(args.at(-1));
+      const isStart = platform === 'darwin' ? args[1] === 'lstart=' : command.includes('StartTime');
+      const isCommand = platform === 'darwin' ? args[1] === 'args=' : command.includes('CommandLine');
+      const fail = delayMs == null && (when === 'before' || armed) && ((file === 'start' && isStart) || (file === 'command' && isCommand));
+      if (fail) throw ENOENT;
+      if (isStart) return platform === 'darwin' ? 'Mon Oct 19 12:00:00 2026\n' : '2026-10-19T12:00:00.0000000Z\n';
+      if (isCommand) return 'cloudflared tunnel --token x\n';
+      throw new Error(`unexpected ${command}`);
+    },
+    signalProcess: (_pid, sig) => { signals.push(sig); armed = true; },
+    now: () => clock,
+    pause: async ms => { clock += ms; },
+  };
+  return { io, signals, clock: () => clock };
+}
+test('a process reaped during a start or command read is gone, and one that remains unreadable is not signaled', async () => {
+  const record = { pid: 42, start: 100 };
+  const darwin = { pid: 42, start: 'Mon Oct 19 12:00:00 2026' };
+  const windows = { pid: 42, start: '2026-10-19T12:00:00.0000000Z' };
+  const cases = [
+    ['stat', record, 'linux'], ['cmdline', record, 'linux'], ['status', record, 'linux'],
+    ['start', darwin, 'darwin'], ['command', darwin, 'darwin'],
+    ['start', windows, 'win32'], ['command', windows, 'win32'],
+  ];
+  for (const [file, item, platform] of cases) {
+    for (const stillThere of [false, true]) {
+      const before = raceIo({ platform, when: 'before', file, stillThere });
+      const early = await stopRecordedConnector(item, before.io);
+      assert.equal(early, stillThere ? 'unverified' : 'stopped', `${platform} ${file} before still=${stillThere}`);
+      assert.deepEqual(before.signals, [], `${platform} ${file} before`);
+      const after = raceIo({ platform, when: 'after', file, stillThere });
+      const later = await stopRecordedConnector(item, after.io);
+      assert.equal(later, stillThere ? 'unverified-after-signal' : 'stopped', `${platform} ${file} after still=${stillThere}`);
+      assert.deepEqual(after.signals, ['SIGTERM'], `${platform} ${file} after`);
+    }
+  }
+});
+test('a cloudflared that exits on SIGTERM, including 300ms later, is stopped and may be replaced', async t => {
+  const immediate = raceIo({ when: 'after', file: 'stat', stillThere: false, delayMs: 0 });
+  assert.equal(await stopRecordedConnector({ pid: 42, start: 100 }, immediate.io), 'stopped');
+  assert.deepEqual(immediate.signals, ['SIGTERM']);
+  assert.equal(immediate.clock(), 0);
+  const delayed = raceIo({ when: 'after', file: 'stat', stillThere: false, delayMs: 300 });
+  const running = await resumeInherited(t, { pid: 42, start: 100 }, delayed.io);
+  assert.equal(delayed.signals[0], 'SIGTERM');
+  assert.equal(delayed.clock(), 300);
+  assert.equal(running.connectors.length, 1);
+  assert.equal(running.controller.snapshot(true).status, 'online');
+});
+test('a cloudflared that stays unreadable after SIGTERM is not replaced', async t => {
+  const io = raceIo({ when: 'after', file: 'cmdline', stillThere: true });
+  const held = await resumeInherited(t, { pid: 42, start: 100 }, io.io);
+  assert.deepEqual(io.signals, ['SIGTERM']);
+  assert.equal(held.connectors.length, 0);
+  assert.equal(held.gates.length, 0);
+  const issue = held.controller.snapshot(true).issue;
+  assert.equal(issue.code, 'LOCK');
+  assert.equal(issue.reason, 'unverified-after-signal');
+  assert.equal(issue.retryAt, undefined);
+  assert.equal(held.controller.snapshot(true).status, 'error');
 });
 test('cloudflared is not started when this machine cannot read any process start time', async t => {
   const f = await fixture(t, { authorize: false, state: { ...savedState() }, overrides: { readProcessStart: async () => null } });

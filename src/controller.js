@@ -22,7 +22,7 @@ const ACTIONS = { AUTHORIZE: 'authorize', API_TOKEN: 'authorize', HOST_REVIEW: '
 export function issueOf(error) {
   const { code, message, details } = safeError(error);
   const issue = { code, message };
-  if (details?.reason === 'start-time' || details?.reason === 'stuck') issue.reason = details.reason;
+  if (details?.reason === 'start-time' || details?.reason === 'stuck' || details?.reason === 'unverified-after-signal') issue.reason = details.reason;
   const action = ACTIONS[code] ?? (RETRYABLE.has(code) ? 'resume' : undefined);
   if (action) issue.action = action;
   return issue;
@@ -470,10 +470,13 @@ export class Controller {
     await this.store.assertOwnership?.();
     const outcome = await this.deps.stopRecordedConnector(record, { ...(this.deps.connectorIo || {}), signal });
     if (outcome === 'stopped' || outcome === 'replaced') { this.store.inheritedConnector = null; return; }
-    const stuck = outcome === 'stuck';
-    throw new CfError('LOCK', stuck
+    const reason = outcome === 'stuck' ? 'stuck' : outcome === 'unverified-after-signal' ? 'unverified-after-signal' : 'start-time';
+    const message = reason === 'stuck'
       ? 'The previous cloudflared was still present after it was stopped, so another was not started.'
-      : 'The previous cloudflared could not be confirmed, so it was not stopped and another was not started.', { reason: stuck ? 'stuck' : 'start-time' });
+      : reason === 'unverified-after-signal'
+        ? 'A stop signal was sent to the previous cloudflared, but this computer could not confirm that it had exited, so another was not started.'
+        : 'The previous cloudflared could not be confirmed, so it was not stopped and another was not started.';
+    throw new CfError('LOCK', message, { reason });
   }
   async rememberConnector(connector) {
     if (typeof this.store.recordConnector !== 'function') return;

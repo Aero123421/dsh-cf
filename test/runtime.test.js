@@ -508,6 +508,33 @@ test('a reused pid or a process that is not cloudflared is not killed', { skip: 
   assert.equal(await stopRecordedConnector({ pid: child.pid, start: start + 1 }), 'replaced');
   assert.doesNotThrow(() => process.kill(child.pid, 0));
 });
+test('a cloudflared that exits on SIGTERM is stopped, including one that waits 300ms', { skip: process.platform !== 'linux' }, async t => {
+  const { spawn } = await import('node:child_process');
+  const { stopRecordedConnector, readProcessStart } = await import('../src/connector.js');
+  const run = async (code, minimumMs) => {
+    const dir = await directory(t);
+    const binary = join(dir, 'cloudflared');
+    const ready = join(dir, 'ready');
+    await writeFile(binary, `#!/usr/bin/env node\n${code}\nrequire('node:fs').writeFileSync(${JSON.stringify(ready)}, '1');\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
+    const child = spawn(binary, [], { stdio: 'ignore' });
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    child.on('error', () => {});
+    t.after(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } });
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      try { await readFile(ready); break; } catch { await new Promise(r => setTimeout(r, 10)); }
+    }
+    await readFile(ready);
+    const started = await readProcessStart(child.pid);
+    assert.equal(typeof started, 'number');
+    const began = Date.now();
+    assert.equal(await stopRecordedConnector({ pid: child.pid, start: started }), 'stopped');
+    if (minimumMs) assert.ok(Date.now() - began >= minimumMs, `returned in ${Date.now() - began}ms`);
+    await exited;
+  };
+  await run('');
+  await run('process.on("SIGTERM", () => setTimeout(() => process.exit(0), 300));', 250);
+});
 test('a connector record with no start time is inherited and is not treated as already gone', async t => {
   const dir = await directory(t);
   await writeFile(join(dir, 'owner.lock'), JSON.stringify({ pid: 2147483647, nonce: 'stale', heartbeatMs: 40, connector: { pid: 42, start: null } }));
@@ -610,7 +637,7 @@ setInterval(() => {}, 1000);
   const observed = new Set();
   let scanning = false;
   const sample = async () => {
-    if (scanning) return;
+    while (scanning) await new Promise(r => setTimeout(r, 5));
     scanning = true;
     try {
       const names = await readdir('/proc');
@@ -649,22 +676,46 @@ setInterval(() => {}, 1000);
     waiter.once('message', message => { clearTimeout(timer); resolve(message); });
     waiter.once('exit', code => { clearTimeout(timer); reject(new Error(`waiter exited ${code}: ${waiterLog.slice(0, 800)}`)); });
   });
-  assert.ok(['stopped', 'replaced', 'stuck', 'unverified'].includes(stopped.outcome), stopped.outcome);
+  assert.equal(stopped.outcome, 'stopped');
   owner.kill('SIGCONT');
   let reported;
   const until = Date.now() + 8_000;
   while (Date.now() < until) {
     await sample();
     try { reported = JSON.parse(await readFile(statusPath, 'utf8')); } catch { reported = null; }
-    if (reported?.code === 'LOCK' && !reported.pid) break;
+    if (reported?.code === 'LOCK' && reported.reason == null && reported.pid == null) break;
     await new Promise(r => setTimeout(r, 50));
   }
-  clearInterval(poll);
   assert.equal(reported?.code, 'LOCK', JSON.stringify(reported));
+  assert.equal(reported.reason, null, JSON.stringify(reported));
   assert.equal(reported.pid, null);
-  assert(samples.length > 0);
+  // Production heartbeat is 5s, and the 30s retry step must not start cloudflared.
+  // This owner uses heartbeatMs 80, so that 30s step scales to 480ms. Watch 4× it.
+  const watchMultiple = 4;
+  const watchMs = 30_000 * (80 / 5_000) * watchMultiple;
+  clearInterval(poll);
+  const pidsAtLock = observed.size;
+  const after = [];
+  let snaps = 0;
+  const watchUntil = Date.now() + watchMs;
+  while (Date.now() < watchUntil) {
+    await sample();
+    after.push(samples.at(-1));
+    let snap = null;
+    try { snap = JSON.parse(await readFile(statusPath, 'utf8')); } catch { snap = null; }
+    if (snap) {
+      snaps += 1;
+      assert.equal(snap.code, 'LOCK', JSON.stringify(snap));
+      assert.equal(snap.reason, null, JSON.stringify(snap));
+      assert.equal(snap.pid, null, JSON.stringify(snap));
+    }
+    await new Promise(r => setTimeout(r, 40));
+  }
+  assert(after.length >= watchMultiple, `samples ${after.length}`);
+  assert(snaps >= watchMultiple, `status samples ${snaps}`);
+  assert(after.every(count => count === 0), `counts ${after.join(',')}`);
+  assert.equal(observed.size, pidsAtLock, `pids ${[...observed].join(',')}`);
   assert(samples.every(count => count <= 1), `counts ${samples.join(',')}`);
-  assert(observed.size <= 1, `pids ${[...observed].join(',')}`);
 });
 test('closing releases in-process ownership so a reloaded plugin can reopen the profile', async t => {
   const dir = await directory(t); const first = await new Store(dir).open(); await first.close();

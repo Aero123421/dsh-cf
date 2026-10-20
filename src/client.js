@@ -265,6 +265,7 @@ window.__ModuleLoader__.load({
     T('i_lock', 'Another DSH is using this profile, or this one lost it. Publishing is stopped. Restart this DSH.', '別のDSHがこのプロファイルを使っているか、このDSHが使用権を失いました。公開は止まっています。このDSHを再起動してください。', '另一个 DSH 正在使用这个配置，或这个 DSH 失去了使用权。公开已停止。请重新启动这个 DSH。');
     T('i_lockStart', 'This computer could not read a process start time, so the previous cloudflared was left running and another was not started. Publishing stays stopped. Restart this DSH once start times can be read.', 'プロセスの開始時刻を読めなかったため、以前のcloudflaredは止めず、新しいcloudflaredも起動していません。公開は止まったままです。開始時刻を読めるようにしてから、このDSHを再起動してください。', '无法读取进程的开始时间，因此没有停止以前的 cloudflared，也没有启动新的 cloudflared。公开保持停止。请在可以读取开始时间后重新启动这个 DSH。');
     T('i_lockStuck', 'The previous cloudflared was still listed two seconds after it was stopped, so another was not started. Publishing stays stopped. Restart this DSH once that process is gone.', '以前のcloudflaredを止めたあと2秒経ってもプロセスが残っていたため、新しいcloudflaredは起動していません。公開は止まったままです。そのプロセスが居なくなってから、このDSHを再起動してください。', '停止以前的 cloudflared 两秒后该进程仍在，因此没有启动新的 cloudflared。公开保持停止。请在该进程消失后重新启动这个 DSH。');
+    T('i_lockSignaled', 'A stop signal was sent to the previous cloudflared, but this computer could not confirm that it had exited, so another was not started. Publishing stays stopped. Restart this DSH once that process is gone.', '以前のcloudflaredへ停止シグナルを送りましたが、終了したことを確認できませんでした。新しいcloudflaredは起動していません。公開は止まったままです。そのプロセスが居なくなってから、このDSHを再起動してください。', '已向以前的 cloudflared 发送停止信号，但无法确认它已经退出，因此没有启动新的 cloudflared。公开保持停止。请在该进程消失后重新启动这个 DSH。');
     T('i_stateCorrupt', 'The saved plugin state could not be read, so nothing was changed. Keep a copy of .dsh-cf/state.json in the profile folder, fix it or move it aside, then reload DSH.', '保存されたプラグインの状態を読めなかったため、何も変更していません。プロファイルの.dsh-cf/state.jsonを控えてから、直すか別の場所へ移し、DSHを読み込み直してください。', '无法读取已保存的插件状态，因此没有做任何更改。请先备份配置文件夹中的 .dsh-cf/state.json，修复或移开后重新加载 DSH。');
     T('i_statePath', 'The plugin’s state folder is not a private, regular folder. Fix .dsh-cf in the profile folder, then reload DSH.', 'プラグインの状態の保存先が、通常の非公開フォルダーではありません。プロファイルの.dsh-cfを直してから、DSHを読み込み直してください。', '插件的状态文件夹不是普通的私有文件夹。请修复配置文件夹中的 .dsh-cf，然后重新加载 DSH。');
     T('i_stateWrite', 'The verification result could not be saved, so publishing was stopped. Check the file permissions of the profile folder, then resume.', '確認結果を保存できなかったため、公開を止めました。プロファイルのフォルダーの権限を確認してから、再開してください。', '无法保存确认结果，因此已停止公开。请检查配置文件夹的权限，然后恢复。');
@@ -358,6 +359,7 @@ window.__ModuleLoader__.load({
     function issueText(t, issue) {
       if (issue?.reason === 'start-time') return t('i_lockStart');
       if (issue?.reason === 'stuck') return t('i_lockStuck');
+      if (issue?.reason === 'unverified-after-signal') return t('i_lockSignaled');
       const key = guideKey(issue?.code);
       if (key) return t('i_' + key);
       const message = issue?.message;

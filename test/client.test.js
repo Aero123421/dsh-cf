@@ -32,7 +32,7 @@ test('every language has the same keys, and no key is left without a use', async
     step_: plugin.STEP_IDS, ev_: plugin.EVIDENCE, ss_: ['idle', 'working', 'waiting', 'done', 'error'],
     cn_: ['connected', 'starting', 'disconnected', 'error', 'stopped'], dl_: ['metadata', 'downloading', 'verified'],
     pi_: ['found', 'not-found', 'ambiguous'], pm_: ['clear-recorded', 'delete-unrecorded', 'clear-not-found'], pmd_: ['clear-recorded', 'delete-unrecorded', 'clear-not-found'],
-    i_: [...new Set(Object.values(plugin.GUIDE)), 'cfDenied', 'cfMissing', 'cfRate', 'cfServer', 'cfOther', 'generic', 'lockStart', 'lockStuck'],
+    i_: [...new Set(Object.values(plugin.GUIDE)), 'cfDenied', 'cfMissing', 'cfRate', 'cfServer', 'cfOther', 'generic', 'lockStart', 'lockStuck', 'lockSignaled'],
   };
   const dynamic = new Set();
   for (const [prefix, values] of Object.entries(families)) for (const value of values) { dynamic.add(prefix + value); assert(keys.includes(prefix + value), `missing ${prefix}${value}`); }
@@ -92,6 +92,7 @@ test('messages are localized, hide raw codes and never trust an unsafe code or a
     assert.equal(plugin.issueText(t, { code: 'WRITE_UNKNOWN', message: 'raw' }), t('i_writeUnknown'));
     assert.equal(plugin.issueText(t, { code: 'LOCK', reason: 'start-time', message: 'raw' }), t('i_lockStart'));
     assert.equal(plugin.issueText(t, { code: 'LOCK', reason: 'stuck', message: 'raw' }), t('i_lockStuck'));
+    assert.equal(plugin.issueText(t, { code: 'LOCK', reason: 'unverified-after-signal', message: 'raw' }), t('i_lockSignaled'));
     assert.equal(plugin.issueText(t, { code: 'LOCK', message: 'raw' }), t('i_lock'));
   }
   assert.equal(plugin.issueTone({ code: 'TUNNEL_DISCONNECTED' }, 'reconnecting'), 'info');

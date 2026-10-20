@@ -195,25 +195,30 @@ async function processZombie(pid, io) {
   const read = io.readFile ?? readFile;
   return /^State:\s+Z/m.test(await read(`/proc/${pid}/status`, 'utf8').catch(() => ''));
 }
+/** A read can fail because the process was reaped after `kill(pid, 0)` succeeded. Check existence again: absence is `gone`, presence stays `unverified`. */
+async function unverifiedOrGone(pid, io) {
+  return (await processExists(pid, io)) ? 'unverified' : 'gone';
+}
 /** `gone` when the pid is free, `match` or `zombie` for the recorded cloudflared, `replaced` for another process, `unverified` when the start time cannot be checked. */
 async function identifyConnector(record, io) {
   if (!record || !Number.isSafeInteger(record.pid) || record.pid <= 0 || normalizeStart(record.start) == null) return 'unverified';
   if (!(await processExists(record.pid, io))) return 'gone';
   const start = await readProcessStart(record.pid, io);
-  if (start == null) return 'unverified';
+  if (start == null) return unverifiedOrGone(record.pid, io);
   if (start !== normalizeStart(record.start)) return 'replaced';
   const cmd = await commandLine(record.pid, io);
-  if (typeof cmd !== 'string') return 'unverified';
+  if (typeof cmd !== 'string') return unverifiedOrGone(record.pid, io);
   if (cmd.includes('cloudflared')) return 'match';
-  if (cmd.trim() === '') return (await processZombie(record.pid, io)) ? 'zombie' : 'unverified';
+  if (cmd.trim() === '') return (await processZombie(record.pid, io)) ? 'zombie' : unverifiedOrGone(record.pid, io);
   return 'replaced';
 }
 /**
  * Stop the cloudflared recorded in owner.lock.
  * `stopped` — that process is gone. `replaced` — the PID belongs to something else and was not signaled.
- * `unverified` — the start time could not be checked; nothing was signaled.
+ * `unverified` — the start time could not be checked, and nothing was signaled.
+ * `unverified-after-signal` — a stop signal was sent, then the process still existed but could not be checked.
  * `stuck` — the process was confirmed and is still present about two seconds after SIGKILL.
- * A caller must not start another cloudflared after `unverified` or `stuck`.
+ * A caller must not start another cloudflared after `unverified`, `unverified-after-signal`, or `stuck`.
  */
 export async function stopRecordedConnector(record, io = {}) {
   if (!record) return 'stopped';
@@ -222,33 +227,32 @@ export async function stopRecordedConnector(record, io = {}) {
   const now = io.now ?? Date.now;
   const termMs = io.termMs ?? 5_000;
   const killMs = io.killMs ?? 2_000;
+  let signaled = false;
   const send = name => {
     const signalProcess = io.signalProcess ?? ((pid, sig) => process.kill(pid, sig));
-    try { signalProcess(record.pid, name); return 'sent'; }
+    try { signalProcess(record.pid, name); signaled = true; return 'sent'; }
     catch (error) { return error?.code === 'ESRCH' ? 'missing' : 'denied'; }
   };
+  const classify = kind => (kind === 'unverified' && signaled ? 'unverified-after-signal' : kind);
   const finish = async sig => {
-    const kind = await identifyConnector(record, io);
+    const kind = classify(await identifyConnector(record, io));
     if (kind === 'gone') return 'stopped';
-    if (kind === 'replaced') return 'replaced';
-    if (kind === 'unverified') return 'unverified';
+    if (kind === 'replaced' || kind === 'unverified' || kind === 'unverified-after-signal') return kind;
     if (kind === 'zombie' && sig === 'SIGTERM') return 'pending';
     const sent = send(sig);
     if (sent === 'missing') return (await processExists(record.pid, io)) ? 'stuck' : 'stopped';
     if (sent === 'denied') return 'stuck';
     const deadline = now() + (sig === 'SIGKILL' ? killMs : termMs);
     while (now() < deadline) {
-      const next = await identifyConnector(record, io);
+      const next = classify(await identifyConnector(record, io));
       if (next === 'gone') return 'stopped';
-      if (next === 'replaced') return 'replaced';
-      if (next === 'unverified') return 'unverified';
+      if (next === 'replaced' || next === 'unverified' || next === 'unverified-after-signal') return next;
       if (next === 'zombie' && sig === 'SIGTERM') return 'pending';
       await wait(100, signal);
     }
-    const last = await identifyConnector(record, io);
+    const last = classify(await identifyConnector(record, io));
     if (last === 'gone') return 'stopped';
-    if (last === 'replaced') return 'replaced';
-    if (last === 'unverified') return 'unverified';
+    if (last === 'replaced' || last === 'unverified' || last === 'unverified-after-signal') return last;
     return 'pending';
   };
   const first = await identifyConnector(record, io);
