@@ -246,8 +246,9 @@ export async function stopRecordedConnector(record, io = {}) {
     while (now() < deadline) {
       const next = classify(await identifyConnector(record, io));
       if (next === 'gone') return 'stopped';
-      if (next === 'replaced' || next === 'unverified' || next === 'unverified-after-signal') return next;
+      if (next === 'replaced' || next === 'unverified') return next;
       if (next === 'zombie' && sig === 'SIGTERM') return 'pending';
+      // An unreadable sample while the process is still exiting is not final. Wait out this signal; the deadline decides.
       await wait(100, signal);
     }
     const last = classify(await identifyConnector(record, io));
