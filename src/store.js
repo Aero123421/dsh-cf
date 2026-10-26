@@ -102,7 +102,7 @@ export class Store {
     demand(!OPEN.has(this.dir), 'LOCK', 'This profile state is already open in this DSH process.');
     OPEN.add(this.dir); this.registered = true;
     try { await this.acquire({ wait }); }
-    catch (e) { OPEN.delete(this.dir); this.registered = false; throw e; }
+    catch (e) { await this.close(); throw e; }
     try {
       try { this.state = JSON.parse(await readFile(join(this.dir, 'state.json'), 'utf8')); }
       catch (e) {
@@ -130,9 +130,10 @@ export class Store {
     const take = async () => {
       const lock = await open(path, 'wx', 0o600);
       this.lock = nonce();
-      this.inheritedConnector = null;
       await lock.writeFile(JSON.stringify({ pid: process.pid, nonce: this.lock, heartbeatMs: this.heartbeatMs }));
       await lock.close();
+      // Read only after acquiring the lease: a competing reclaimer may have just preserved a record.
+      this.inheritedConnector = await this.readInheritedConnector();
       this.heartbeat = setInterval(() => {
         if (!this.heartbeatWork) this.heartbeatWork = this.refreshLease().finally(() => { this.heartbeatWork = null; });
       }, this.heartbeatMs);
@@ -165,10 +166,32 @@ export class Store {
       const current = JSON.parse(await readFile(path, 'utf8'));
       demand(current.nonce === previous.nonce, 'LOCK', 'Profile ownership changed. Retry.');
       const inherited = connectorRecord(current.connector);
+      // Keep the unresolved process independently of the lease, before removing its only legacy record.
+      // A crash before/after unlink or a later close must leave the next owner the same process to check.
+      if (inherited) await this.preserveInheritedConnector(inherited);
       await unlink(path); await take();
-      // take() clears inheritedConnector. Put back the cloudflared the previous owner recorded.
-      this.inheritedConnector = inherited;
     } finally { await rmdir(reclaim); }
+  }
+  async readInheritedConnector() {
+    try {
+      const record = connectorRecord(JSON.parse(await readFile(join(this.dir, 'inherited-connector.json'), 'utf8')));
+      demand(record, 'LOCK', 'The previous connector record is invalid. Inspect inherited-connector.json locally.');
+      return record;
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw new CfError('LOCK', 'The previous connector record could not be read. Inspect inherited-connector.json locally.');
+    }
+  }
+  async preserveInheritedConnector(record) {
+    const existing = await this.readInheritedConnector();
+    demand(!existing || (existing.pid === record.pid && existing.start === record.start), 'LOCK', 'Conflicting previous connector records. No record was replaced.');
+    if (!existing) await privateWrite(join(this.dir, 'inherited-connector.json'), JSON.stringify(record) + '\n');
+  }
+  /** Only called after the previous process is confirmed stopped or its PID replaced. Runtime cleanup never clears it. */
+  async clearInheritedConnector() {
+    await this.assertOwnership();
+    await unlink(join(this.dir, 'inherited-connector.json')).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    this.inheritedConnector = null;
   }
   /** Rewrite owner.lock on the inode we already own. A mismatched nonce loses ownership and writes nothing. */
   async writeLock(mutate) {

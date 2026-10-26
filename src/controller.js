@@ -469,7 +469,10 @@ export class Controller {
     if (!record) return;
     await this.store.assertOwnership?.();
     const outcome = await this.deps.stopRecordedConnector(record, { ...(this.deps.connectorIo || {}), signal });
-    if (outcome === 'stopped' || outcome === 'replaced') { this.store.inheritedConnector = null; return; }
+    if (outcome === 'stopped' || outcome === 'replaced') {
+      await this.store.clearInheritedConnector?.();
+      this.store.inheritedConnector = null; return;
+    }
     const reason = outcome === 'stuck' ? 'stuck' : outcome === 'unverified-after-signal' ? 'unverified-after-signal' : 'start-time';
     const message = reason === 'stuck'
       ? 'The previous cloudflared was still present after it was stopped, so another was not started.'
