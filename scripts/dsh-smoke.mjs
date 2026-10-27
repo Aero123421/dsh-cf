@@ -13,6 +13,7 @@ import { Gate } from '../src/gate.js';
 import { accessVerifier } from '../src/access.js';
 import semver from 'semver';
 import manifest from '../package.json' with { type: 'json' };
+import { runCommand, scrubLaunchToken } from './run-command.mjs';
 
 const VERSION = manifest.version;
 
@@ -20,13 +21,9 @@ const source = dirname(dirname(fileURLToPath(import.meta.url)));
 const directory = await mkdtemp(join(tmpdir(), 'dsh-cf-smoke-'));
 const selector = process.env.DSH_CF_DSH_VERSION || 'next';
 assert(/^(?:alpha|next|\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)$/.test(selector), 'invalid DSH selector');
-const scrub = text => text.replace(/([?&]token=)[^\s&]+/g, '$1[redacted]');
+const scrub = scrubLaunchToken;
 async function command(bin, args, cwd = directory, env = process.env) {
-  const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 240_000);
-  try { const [code] = await once(child, 'exit'); assert.equal(code, 0, scrub(output).slice(-3000)); return output; }
-  finally { clearTimeout(timer); }
+  return runCommand(bin, args, { cwd, env });
 }
 function http(port, { path = '/', method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {

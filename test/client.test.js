@@ -395,6 +395,13 @@ test('an issue is shown as localized guidance, with its code only in the details
   assert(reconnecting.button('Retry now'));
 });
 
+test('an account name that contains a placeholder is inserted once', async () => {
+  const snapshot = CONFIGURED({ status: 'unconfigured', setup: null, publicUrl: null, authorization: { active: true, until: Date.now() + 3_600_000 }, accounts: [{ id: 'a'.repeat(32), name: 'Ops {accounts}' }] });
+  const ui = await mount(snapshot);
+  assert.match(ui.text(), /Connected to Ops \{accounts\}\./);
+  assert.doesNotMatch(ui.text(), /Ops Ops/);
+});
+
 test('setup starts with the token step and keeps the unsaved form (never the token) for the next visit', async () => {
   const snapshot = CONFIGURED({ status: 'unconfigured', setup: null, publicUrl: null, authorization: { active: true, until: Date.now() + 3600000 }, accounts: [{ id: 'a'.repeat(32), name: 'Personal' }],
     account: { accountId: 'a'.repeat(32), zones: [{ id: 'b'.repeat(32), name: 'example.com' }], idps: [{ id: 'provider-1', name: 'One-time PIN' }], mfa: 'independent', mfaMissing: [], teamDomain: 'team.cloudflareaccess.com', organizationRevision: 'r' } });
