@@ -90,7 +90,14 @@ export class Controller {
   authorize(token) {
     const generation = this.invalidateAuthorization();
     return this.request(async (signal, check) => {
-      const accounts = await new Cloudflare(token, this.fetch).accounts(signal);
+      let accounts;
+      try { accounts = await new Cloudflare(token, this.fetch).accounts(signal); }
+      catch (error) {
+        // A bearer value that is not token-shaped is HTTP 400 (Cloudflare error 6003) and never authenticates.
+        // A shaped token that Cloudflare refuses is 401 or 403 and stays a refusal.
+        if (error instanceof CfError && error.code === 'CF_400') throw new CfError('API_TOKEN', 'Enter an API token, not a Global API key.');
+        throw error;
+      }
       check();
       this.token = token; this.tokenUntil = Date.now() + GRANT_MS; this.accountList = accounts; this.accountDetails = null;
       clearTimeout(this.grantTimer); this.grantTimer = setTimeout(() => this.expireGrant(), GRANT_MS + 50); this.grantTimer.unref?.();

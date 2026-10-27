@@ -1003,7 +1003,8 @@ window.__ModuleLoader__.load({
 
     // ---- The panel: all state, polling and actions ----
     function Panel({ connection, t: rawT }) {
-      const t = (key, params) => fill(typeof rawT === 'function' ? rawT(key, params) : translate('en', key, params), params);
+      // rawT and translate already substitute {name}. A second pass would expand a value that itself contains a placeholder.
+      const t = (key, params) => typeof rawT === 'function' ? rawT(key, params) : translate('en', key, params);
       const rawTag = t('localeTag'), tag = /^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(rawTag) ? rawTag : undefined;
       const [snap, setSnap] = React.useState(null);
       const [connErr, setConnErr] = React.useState(false);
