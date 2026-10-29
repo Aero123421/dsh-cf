@@ -4,7 +4,7 @@
 
 dsh-cf `0.1.0-alpha.9`、基準コミット `e4a0194ff57b5ec982cd153f8f32ca1f1db2961c` を確認しました。コードや依存版を変える必要のある最新 DSH API の不一致は、この検証では見つかりませんでした。
 
-公式配布元は [npm の @deepseek-ai/dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)、本体は [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) です。確認時の `latest` は `0.2.1-rc.2`、`next` は `0.2.1-rc.4`、`alpha` は `0.2.2-alpha.2` でした。すべて prerelease です。正式安定版は公開 versions にありませんでした。
+公式配布元は [npm の @deepseek-ai/dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)、本体は [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) です。当初確認時の `latest` は `0.2.1-rc.2`、`next` は `0.2.1-rc.4`、`alpha` は `0.2.2-alpha.2` でした。すべて prerelease です。正式安定版は公開 versions にありませんでした。
 
 | 実行した対象 | 公式コミット | 結果 |
 | --- | --- | --- |
@@ -27,3 +27,11 @@ Linux x64、Node.js 24.19.0。`npm ci && npm run check` 相当の通常検査で
 隔離 DSH latest rc.2、next rc.4、alpha 0.2.2-alpha.2 で対応修正後の Remora 0.1.7 と同時に有効にし、両 route の再起動後の復帰、gate 経由 Remora 状態取得、gate 経由の全権拡大拒否を確認しました。rc.4 は導入順を逆にしても成功しました。CF 側の HTTP/RPC/WS/JWT 検査も同時有効中に成功しています。3版とも Chromium で両設定画面を描画し、再起動後も開け、console/page error は 0 件でした。
 
 DSH は公式 npm の固定版を隔離導入しました。gate と Access JWT は生成したローカル RSA の fixture、Cloudflare API・connector は mock です。実 Cloudflare 認証・公開 Tunnel、実 Hub、外部配備、macOS/Windows/Desktop は未検証です。新しい公開タグや Release は作っていません。
+
+## 15:00 UTCの締切で追加したrc.5
+
+公式 registry の `0.2.1-rc.5` 公開時刻は `2026-10-29T14:15:23.355Z` で、版確認締切 `2026-10-29T15:00:00Z` より前でした。締切時の next は rc.5、latest と alpha は上記のままです。公式 npm CLI tarball の SHA-256 は `60987566f19e0ded1f7918c00a65c19c56ea25f5977ee0bfd5697c5c113ec4e1` です。
+
+rc.5 の公式 git tag は照合時に取得できなかったため、git のコミット同士の比較ではなく、公式 npm 配布物の JavaScript と型を比較しました。rc.4 → rc.5 で Connection、WebServer、configEditor、locale、app-boot の `lib/index.js` は byte 一致し、実行コードの追加修正は不要でした。client-modules の同ファイルの差は埋め込み commit 表示 `ec17a2c` → `d4db512` のみです。この短い表示を検証済み source commit としては扱いません。
+
+rc.5 の隔離 Host に同じ packed cf + Remora を導入し、公式 trustedHosts 保存／再読込、HTTP/RPC/WS、JWT、管理拒否、Remora 権限拡大拒否、Chromium 設定表示、停止・再起動が成功しました。console/page error は 0 件です。`npm run check:dsh` も rc.5 の公開 app-boot で成功しました。当初の rc.2 / rc.4 / alpha の結果はそのまま残し、締切後の新 release は今回の対象に追加しません。
