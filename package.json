@@ -1,6 +1,6 @@
 {
   "name": "dsh-cf",
-  "version": "0.1.0-alpha.9",
+  "version": "0.1.0-alpha.10",
   "description": "Owner-only Cloudflare Access and Tunnel integration for DeepSeek Harness.",
   "type": "module",
   "main": "src/index.js",

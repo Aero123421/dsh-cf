@@ -22,13 +22,13 @@
 DSHを新規導入する場合は、確認済みの版とプラグイン導入用のpnpmを入れます。2026-10-29 15:00 UTCの版確認締切ではnpm `latest`は`0.2.1-rc.2`、`next`は`0.2.1-rc.5`、`alpha`は`0.2.2-alpha.2`です。いずれもプレリリースです。基本の受入対象であるlatest rc.2、当初のnext rc.4、追加したnext rc.5、alpha.2の[隔離DSH検証](docs/dsh-compatibility-2026-10-29.md)を行っています。既に対応版とpnpmを使っている場合、最初のコマンドは不要です。
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.2 pnpm@11.25.0
+npm install -g @deepseek-ai/dsh@0.2.1-rc.2 pnpm@10.34.9
 ```
 
 プラグインは公開タグを指定して導入します。
 
 ```sh
-dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.9'
+dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.10'
 ```
 
 実行中のDSHを再起動し、**設定 → Cloudflare** を開きます。同じプロファイルのDSHを二重起動しないでください。
@@ -41,7 +41,7 @@ dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#v0.1.0-alpha.9'
 dsh plugin --profile web add -w 'github:Aero123421/dsh-cf#<tag>'
 ```
 
-プラグイン自身に更新機能はありません。更新後はDSHを再起動し、ブラウザも一度再読み込みして新しい設定画面を読み込みます。プラグインを入れ替えても、保存済みの設定・接続トークン・Cloudflareの資源は削除されません。配布物のtarballとSHA256SUMSをリリースへ付ける手順は[リリースノート](docs/releases/v0.1.0-alpha.9.md)にあります。
+プラグイン自身に更新機能はありません。更新後はDSHを再起動し、ブラウザも一度再読み込みして新しい設定画面を読み込みます。プラグインを入れ替えても、保存済みの設定・接続トークン・Cloudflareの資源は削除されません。配布物のtarballとSHA256SUMSをリリースへ付ける手順は[リリースノート](docs/releases/v0.1.0-alpha.10.md)にあります。
 
 設定画面の表示はDSH標準のUI部品を使います。入力途中の公開先・ホスト名・メールは、設定画面を閉じて開き直しても同じページの間は残ります（メモリー上だけで、保存はしません。APIトークンは残りません）。
 
