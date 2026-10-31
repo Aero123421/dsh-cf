@@ -831,6 +831,16 @@ test('forget prevents a late account response from restoring account state', asy
   assert.equal(f.controller.accountDetails, null); assert.equal(f.controller.accountList.length, 0); assert.equal(f.controller.token, null);
 });
 
+test('a bearer value Cloudflare rejects before authentication is an API token error and grants nothing', async t => {
+  const refused = status => async () => new Response('', { status });
+  const malformed = await fixture(t, { authorize: false, fetchImpl: refused(400) });
+  await assert.rejects(malformed.act('authorize', { token: 'not-a-cloudflare-token-value' }), { code: 'API_TOKEN' });
+  assert.equal(malformed.controller.snapshot(true).authorization.active, false);
+  const shaped = await fixture(t, { authorize: false, fetchImpl: refused(403) });
+  await assert.rejects(shaped.act('authorize', { token: 'a'.repeat(40) }), { code: 'CF_403' });
+  assert.equal(shaped.controller.snapshot(true).authorization.active, false);
+});
+
 test('a new API token supersedes a grant that is still being verified', async t => {
   const api = fakeCloudflare(), entered = deferred(), release = deferred(); let hold = true;
   const controller = new Controller({ store: memoryStore(), adapter: { invalidate() {} }, fetchImpl: async (url, options) => { if (hold) { hold = false; entered.resolve(); await release.promise; } return api.fetchImpl(url, options); } });
