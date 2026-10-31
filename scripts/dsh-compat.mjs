@@ -9,7 +9,11 @@ import manifest from '../package.json' with { type: 'json' };
 const peer = manifest.peerDependencies['@deepseek-ai/dsh'];
 const registry = spawnSync('npm', ['view', '@deepseek-ai/dsh', 'dist-tags', '--json'], { encoding: 'utf8', timeout: 30_000 });
 if (registry.status !== 0) commandFailure(registry, 'DSH channel discovery');
-const tags = JSON.parse(registry.stdout);
+// npm 12 returns a one-element array for `npm view ... dist-tags --json`;
+// npm 10/11 return the object directly.
+const reportedTags = JSON.parse(registry.stdout);
+const tags = Array.isArray(reportedTags) && reportedTags.length === 1 ? reportedTags[0] : reportedTags;
+if (!tags || ['latest', 'alpha', 'next'].some(tag => typeof tags[tag] !== 'string')) fail('npm did not return all expected DSH dist-tags');
 const installs = [...new Set(['0.2.1-alpha.2', '0.2.1-alpha.3', tags.latest, tags.alpha, tags.next])];
 // DSH's app-boot decides with semver.satisfies(runtime, range, { includePrerelease: true }).
 const satisfies = (runtime, range) => semver.satisfies(runtime, range, { includePrerelease: true });
